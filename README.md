@@ -198,7 +198,7 @@ helm install kbot kbot/kubectl-bot \
 
 ### Admin User (Full Access)
 ```yaml
-apiVersion: telegram.k8s.io/v1
+apiVersion: kbot.go.mamad.dev/v1
 kind: TelegramBotPermission
 metadata:
   name: admin-user-123456
@@ -213,7 +213,7 @@ spec:
 
 ### Developer (Logs only, specific app)
 ```yaml
-apiVersion: telegram.k8s.io/v1
+apiVersion: kbot.go.mamad.dev/v1
 kind: TelegramBotPermission
 metadata:
   name: developer-user-987654
@@ -229,7 +229,7 @@ spec:
 
 ### Operator (Restart deployments in staging)
 ```yaml
-apiVersion: telegram.k8s.io/v1
+apiVersion: kbot.go.mamad.dev/v1
 kind: TelegramBotPermission
 metadata:
   name: operator-user-555555
@@ -329,7 +329,7 @@ go test -v ./...
 kubectl logs -l app=telegram-bot -f
 
 # Check if CRD is installed
-kubectl get crd telegrambotpermissions.telegram.k8s.io
+kubectl get crd telegrambotpermissions.kbot.go.mamad.dev
 
 # Check if bot has RBAC permissions
 kubectl auth can-i list telegrambotpermissions --as=system:serviceaccount:default:telegram-bot

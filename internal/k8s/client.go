@@ -73,7 +73,7 @@ func (c *Client) ListNamespaces(ctx context.Context) (*corev1.NamespaceList, err
 // TelegramBotPermissionGVR returns the GroupVersionResource for TelegramBotPermission
 func TelegramBotPermissionGVR() schema.GroupVersionResource {
 	return schema.GroupVersionResource{
-		Group:    "telegram.k8s.io",
+		Group:    "kbot.go.mamad.dev",
 		Version:  "v1",
 		Resource: "telegrambotpermissions",
 	}
@@ -82,8 +82,8 @@ func TelegramBotPermissionGVR() schema.GroupVersionResource {
 // AddToScheme adds known types to scheme
 func AddToScheme(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(
-		schema.GroupVersion{Group: "telegram.k8s.io", Version: "v1"},
+		schema.GroupVersion{Group: "kbot.go.mamad.dev", Version: "v1"},
 	)
-	metav1.AddToGroupVersion(scheme, schema.GroupVersion{Group: "telegram.k8s.io", Version: "v1"})
+	metav1.AddToGroupVersion(scheme, schema.GroupVersion{Group: "kbot.go.mamad.dev", Version: "v1"})
 	return nil
 }

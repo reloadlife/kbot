@@ -9,7 +9,7 @@ A Kubernetes Telegram Bot written in Go that provides secure, RBAC-controlled ac
 ## Core Architecture Decisions
 
 ### Permission Storage: Kubernetes CRDs
-- Permissions are stored as `TelegramBotPermission` custom resources (group: `telegram.k8s.io/v1`)
+- Permissions are stored as `TelegramBotPermission` custom resources (group: `kbot.go.mamad.dev/v1`)
 - Each CR maps a Telegram user ID to granular K8s permissions (namespace, resources, verbs, selectors)
 - This makes permissions version-controlled, auditable via K8s events, and GitOps-compatible
 - Bootstrap admins are configured via `ADMIN_TELEGRAM_IDS` environment variable
@@ -113,7 +113,7 @@ The validator:
 ## CRD Spec Structure
 
 ```yaml
-apiVersion: telegram.k8s.io/v1
+apiVersion: kbot.go.mamad.dev/v1
 kind: TelegramBotPermission
 metadata:
   name: user-<telegram-id>

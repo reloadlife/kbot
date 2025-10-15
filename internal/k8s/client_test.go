@@ -9,8 +9,8 @@ import (
 func TestTelegramBotPermissionGVR(t *testing.T) {
 	gvr := TelegramBotPermissionGVR()
 
-	if gvr.Group != "telegram.k8s.io" {
-		t.Errorf("Expected group 'telegram.k8s.io', got '%s'", gvr.Group)
+	if gvr.Group != "kbot.go.mamad.dev" {
+		t.Errorf("Expected group 'kbot.go.mamad.dev', got '%s'", gvr.Group)
 	}
 
 	if gvr.Version != "v1" {
@@ -27,7 +27,7 @@ func TestTelegramBotPermissionGVR_GroupVersion(t *testing.T) {
 	gv := gvr.GroupVersion()
 
 	expectedGV := schema.GroupVersion{
-		Group:   "telegram.k8s.io",
+		Group:   "kbot.go.mamad.dev",
 		Version: "v1",
 	}
 

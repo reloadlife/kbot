@@ -11,7 +11,7 @@ metadata:
   name: telegram-bot
 rules:
   # Access to TelegramBotPermission CRDs
-  - apiGroups: ["telegram.k8s.io"]
+  - apiGroups: ["kbot.go.mamad.dev"]
     resources: ["telegrambotpermissions"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 

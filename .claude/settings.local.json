@@ -10,7 +10,8 @@
       "Bash(make test-coverage:*)",
       "Bash(make:*)",
       "Bash(go version)",
-      "Bash(go list:*)"
+      "Bash(go list:*)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": []

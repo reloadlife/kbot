@@ -148,7 +148,7 @@ logs:
 create-example-permission:
 	@echo "Creating example permission..."
 	@kubectl apply -f - <<EOF
-	apiVersion: telegram.k8s.io/v1
+	apiVersion: kbot.go.mamad.dev/v1
 	kind: TelegramBotPermission
 	metadata:
 	  name: example-user-123456789

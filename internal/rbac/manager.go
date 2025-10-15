@@ -88,7 +88,7 @@ func (m *Manager) GrantPermission(ctx context.Context, userID int64, namespace, 
 		// Create new permission with viewer role
 		permission = &TelegramBotPermission{
 			TypeMeta: metav1.TypeMeta{
-				APIVersion: "telegram.k8s.io/v1",
+				APIVersion: "kbot.go.mamad.dev/v1",
 				Kind:       "TelegramBotPermission",
 			},
 			ObjectMeta: metav1.ObjectMeta{
