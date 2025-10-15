@@ -36,6 +36,15 @@ func TestLoad_Success(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Errorf("Expected default log level 'info', got '%s'", cfg.LogLevel)
 	}
+
+	// Check default bot namespace and deployment name
+	if cfg.BotNamespace != "default" {
+		t.Errorf("Expected default bot namespace 'default', got '%s'", cfg.BotNamespace)
+	}
+
+	if cfg.BotDeploymentName != "telegram-bot" {
+		t.Errorf("Expected default bot deployment name 'telegram-bot', got '%s'", cfg.BotDeploymentName)
+	}
 }
 
 func TestLoad_CustomLogLevel(t *testing.T) {
@@ -53,6 +62,30 @@ func TestLoad_CustomLogLevel(t *testing.T) {
 
 	if cfg.LogLevel != "debug" {
 		t.Errorf("Expected log level 'debug', got '%s'", cfg.LogLevel)
+	}
+}
+
+func TestLoad_CustomBotConfig(t *testing.T) {
+	os.Setenv("TELEGRAM_BOT_TOKEN", "test-token")
+	os.Setenv("ADMIN_TELEGRAM_IDS", "123456789")
+	os.Setenv("BOT_NAMESPACE", "kbot-system")
+	os.Setenv("BOT_DEPLOYMENT_NAME", "kubectl-bot")
+	defer os.Unsetenv("TELEGRAM_BOT_TOKEN")
+	defer os.Unsetenv("ADMIN_TELEGRAM_IDS")
+	defer os.Unsetenv("BOT_NAMESPACE")
+	defer os.Unsetenv("BOT_DEPLOYMENT_NAME")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	if cfg.BotNamespace != "kbot-system" {
+		t.Errorf("Expected bot namespace 'kbot-system', got '%s'", cfg.BotNamespace)
+	}
+
+	if cfg.BotDeploymentName != "kubectl-bot" {
+		t.Errorf("Expected bot deployment name 'kubectl-bot', got '%s'", cfg.BotDeploymentName)
 	}
 }
 

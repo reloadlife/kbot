@@ -1,0 +1,87 @@
+# Default values for kubectl-bot
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/reloadlife/kbot
+  pullPolicy: Always
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Telegram bot configuration
+telegram:
+  # Bot token from @BotFather (required)
+  token: ""
+  # Comma-separated list of admin Telegram user IDs (required)
+  adminIds: ""
+  # Use existing secret for bot token (optional)
+  existingSecret: ""
+  # Key in existing secret that contains the token
+  existingSecretKey: "token"
+  # Use existing configmap for admin IDs (optional)
+  existingConfigMap: ""
+  # Key in existing configmap that contains admin IDs
+  existingConfigMapKey: "admin_ids"
+
+# Bot self-update configuration
+bot:
+  # Namespace detection (uses Helm release namespace by default)
+  namespace: ""
+  # Deployment name (uses Helm release name by default)
+  deploymentName: ""
+
+# Logging configuration
+logLevel: "info"
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+rbac:
+  # Specifies whether RBAC resources should be created
+  create: true
+
+# Pod annotations
+podAnnotations: {}
+
+# Pod security context
+podSecurityContext: {}
+  # fsGroup: 2000
+
+# Container security context
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}

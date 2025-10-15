@@ -43,6 +43,7 @@ func (b *Bot) handleHelp(ctx context.Context, message *tgbotapi.Message) {
 /grant <user_id> <verb> <resource> [-n <namespace>] [-l <selector>] - Grant permission
 /revoke <user_id> <verb> <resource> [-n <namespace>] - Revoke permission
 /permissions [user_id] - Show user permissions
+/selfupdate - Update bot to latest image
 
 *Examples:*
 /pods production
@@ -564,4 +565,35 @@ func (b *Bot) handlePermissions(ctx context.Context, message *tgbotapi.Message) 
 	}
 
 	b.sendMessage(message.Chat.ID, fmt.Sprintf("*Permissions Summary:*\n\n```\n%s\n```", summary))
+}
+
+// handleSelfUpdate handles the /selfupdate command (admin only)
+func (b *Bot) handleSelfUpdate(ctx context.Context, message *tgbotapi.Message) {
+	userID := message.From.ID
+
+	// Check if user is admin
+	if !b.rbac.IsBootstrapAdmin(userID) {
+		permission, err := b.rbac.GetUserPermission(ctx, userID)
+		if err != nil || permission.Spec.Role != "admin" {
+			b.sendMessage(message.Chat.ID, "❌ Admin access required")
+			return
+		}
+	}
+
+	namespace := b.config.BotNamespace
+	deploymentName := b.config.BotDeploymentName
+
+	b.sendMessage(message.Chat.ID, fmt.Sprintf("🔄 Initiating self-update...\n\n"+
+		"Namespace: `%s`\n"+
+		"Deployment: `%s`\n\n"+
+		"Restarting to pull latest image...", namespace, deploymentName))
+
+	// Restart the bot's own deployment
+	err := b.k8sClient.RestartDeployment(ctx, namespace, deploymentName)
+	if err != nil {
+		b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ Error: %v", err))
+		return
+	}
+
+	b.sendMessage(message.Chat.ID, "✅ Self-update triggered! The bot will restart shortly and pull the latest image from the registry.")
 }

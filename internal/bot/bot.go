@@ -124,6 +124,8 @@ func (b *Bot) handleMessage(ctx context.Context, message *tgbotapi.Message) {
 		b.handleRevoke(ctx, message)
 	case "permissions":
 		b.handlePermissions(ctx, message)
+	case "selfupdate":
+		b.handleSelfUpdate(ctx, message)
 	default:
 		b.sendMessage(message.Chat.ID, "Unknown command. Type /help for available commands.")
 	}
@@ -186,6 +188,7 @@ func (b *Bot) setupCommands() error {
 		{Command: "grant", Description: "Grant permissions to a user (admin only)"},
 		{Command: "revoke", Description: "Revoke permissions from a user (admin only)"},
 		{Command: "permissions", Description: "View user permissions"},
+		{Command: "selfupdate", Description: "Update bot to latest image (admin only)"},
 	}
 
 	cfg := tgbotapi.NewSetMyCommands(commands...)

@@ -8,9 +8,11 @@ import (
 )
 
 type Config struct {
-	TelegramBotToken string
-	AdminTelegramIDs []int64
-	LogLevel         string
+	TelegramBotToken  string
+	AdminTelegramIDs  []int64
+	LogLevel          string
+	BotNamespace      string
+	BotDeploymentName string
 }
 
 // Load loads configuration from environment variables
@@ -36,10 +38,23 @@ func Load() (*Config, error) {
 		logLevel = "info"
 	}
 
+	// Optional: Bot's own namespace and deployment name (for self-update)
+	botNamespace := os.Getenv("BOT_NAMESPACE")
+	if botNamespace == "" {
+		botNamespace = "default"
+	}
+
+	botDeploymentName := os.Getenv("BOT_DEPLOYMENT_NAME")
+	if botDeploymentName == "" {
+		botDeploymentName = "telegram-bot"
+	}
+
 	return &Config{
-		TelegramBotToken: token,
-		AdminTelegramIDs: adminIDs,
-		LogLevel:         logLevel,
+		TelegramBotToken:  token,
+		AdminTelegramIDs:  adminIDs,
+		LogLevel:          logLevel,
+		BotNamespace:      botNamespace,
+		BotDeploymentName: botDeploymentName,
 	}, nil
 }
 

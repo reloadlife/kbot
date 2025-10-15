@@ -1,0 +1,28 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kubectl-bot.fullname" . }}
+  labels:
+    {{- include "kubectl-bot.labels" . | nindent 4 }}
+rules:
+  # Access to TelegramBotPermission CRDs
+  - apiGroups: ["kbot.go.mamad.dev"]
+    resources: ["telegrambotpermissions"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # K8s resources - pods
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "namespaces"]
+    verbs: ["get", "list", "watch"]
+
+  # K8s resources - services
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+
+  # K8s resources - deployments
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+{{- end }}

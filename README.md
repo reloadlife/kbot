@@ -46,6 +46,7 @@ Permissions are stored as `TelegramBotPermission` custom resources with three co
 /grant <user_id> <verb> <resource> [-n <namespace>] [-l <selector>]  - Grant permission
 /revoke <user_id> <verb> <resource> [-n <namespace>]                 - Revoke permission
 /permissions [user_id]                                                - Show permissions
+/selfupdate                                                           - Update bot to latest image
 ```
 
 ## Quick Start
@@ -153,14 +154,60 @@ kubectl logs -l app=telegram-bot
    - Check that `telegram-bot` deployment is running
    - Click on deployment → **View Logs**
 
-#### Option 3: Using Helm (Coming Soon)
+#### Option 3: Using Helm
 
+**From Helm Repository:**
 ```bash
+# Add the Helm repository
 helm repo add kbot https://reloadlife.github.io/kbot
+helm repo update
+
+# Install the chart
 helm install kbot kbot/kubectl-bot \
   --set telegram.token="YOUR_BOT_TOKEN" \
-  --set telegram.adminIds="YOUR_TELEGRAM_ID"
+  --set telegram.adminIds="YOUR_TELEGRAM_ID" \
+  --namespace kbot-system \
+  --create-namespace
 ```
+
+**From Local Chart:**
+```bash
+# Clone the repository
+git clone https://github.com/reloadlife/kbot.git
+cd kbot
+
+# Install from local chart
+helm install kbot ./helm \
+  --set telegram.token="YOUR_BOT_TOKEN" \
+  --set telegram.adminIds="YOUR_TELEGRAM_ID" \
+  --namespace kbot-system \
+  --create-namespace
+```
+
+**With Custom Values:**
+```bash
+# Create a values file
+cat > my-values.yaml <<EOF
+telegram:
+  token: "YOUR_BOT_TOKEN"
+  adminIds: "123456789,987654321"
+
+logLevel: "debug"
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 200m
+    memory: 128Mi
+EOF
+
+# Install with custom values
+helm install kbot kbot/kubectl-bot -f my-values.yaml
+```
+
+See [helm/README.md](helm/README.md) for complete Helm chart documentation.
 
 ### Using the Bot
 
@@ -248,7 +295,39 @@ The bot automatically registers all commands with Telegram, so users can:
 Commands are categorized as:
 - **Resource Queries**: pods, deployments, services, namespaces
 - **Operations**: logs, restart, rollback, scale
-- **Admin**: grant, revoke, permissions
+- **Admin**: grant, revoke, permissions, selfupdate
+
+### Self-Update Feature
+
+The bot can update itself to the latest image from the container registry:
+
+```
+/selfupdate
+```
+
+**How it works:**
+1. Admin-only command (requires bootstrap admin or admin role)
+2. Triggers a rollout restart of the bot's deployment
+3. Kubernetes pulls the latest image (due to `imagePullPolicy: Always`)
+4. Bot restarts with the new version
+5. Works automatically in any namespace where the bot is deployed
+
+**Requirements:**
+- User must be an admin
+- Bot must have permission to patch/update its own deployment (included in default RBAC)
+- The deployment must use `imagePullPolicy: Always`
+
+**Example:**
+```
+You: /selfupdate
+Bot: 🔄 Initiating self-update...
+     Namespace: `default`
+     Deployment: `telegram-bot`
+     Restarting to pull latest image...
+
+Bot: ✅ Self-update triggered! The bot will restart shortly and pull the latest image from the registry.
+[Bot restarts and comes back online with latest version]
+```
 
 ## Permission Examples
 
@@ -368,6 +447,8 @@ go test -v ./...
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token from BotFather | Yes | - |
 | `ADMIN_TELEGRAM_IDS` | Comma-separated list of admin Telegram user IDs | Yes | - |
 | `LOG_LEVEL` | Log level (debug, info, warn, error) | No | info |
+| `BOT_NAMESPACE` | Namespace where bot is deployed (for self-update) | No | default |
+| `BOT_DEPLOYMENT_NAME` | Name of bot's deployment (for self-update) | No | telegram-bot |
 
 ## Security Considerations
 
@@ -416,7 +497,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-MIT License - see LICENSE file for details
+AGPL-3.0 License - see LICENSE file for details
 
 ## Support
 
@@ -425,7 +506,8 @@ MIT License - see LICENSE file for details
 
 ## Roadmap
 
-- [ ] Helm chart
+- [x] Helm chart
+- [x] Self-update feature
 - [ ] Multi-container support for logs
 - [ ] Exec into pods
 - [ ] Port-forwarding via Telegram

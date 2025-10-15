@@ -11,7 +11,9 @@
       "Bash(make:*)",
       "Bash(go version)",
       "Bash(go list:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(go test -v ./...)",
+      "Bash(helm lint:*)"
     ],
     "deny": [],
     "ask": []
