@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telegram-bot
+  namespace: default
+  labels:
+    app: telegram-bot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telegram-bot
+  template:
+    metadata:
+      labels:
+        app: telegram-bot
+    spec:
+      serviceAccountName: telegram-bot
+      containers:
+        - name: bot
+          image: ghcr.io/reloadlife/kbot:latest
+          imagePullPolicy: Always
+          env:
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: telegram-bot-secrets
+                  key: token
+            - name: ADMIN_TELEGRAM_IDS
+              valueFrom:
+                configMapKeyRef:
+                  name: telegram-bot-config
+                  key: admin_ids
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telegram-bot-config
+  namespace: default
+data:
+  admin_ids: "123456789"  # Replace with actual admin Telegram IDs (comma-separated)
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: telegram-bot-secrets
+  namespace: default
+type: Opaque
+stringData:
+  token: "YOUR_TELEGRAM_BOT_TOKEN"  # Replace with actual bot token

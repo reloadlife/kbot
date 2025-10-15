@@ -1,0 +1,70 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: telegrambotpermissions.telegram.k8s.io
+spec:
+  group: telegram.k8s.io
+  names:
+    kind: TelegramBotPermission
+    plural: telegrambotpermissions
+    singular: telegrambotpermission
+    shortNames:
+      - tbp
+  scope: Cluster
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - telegramUserId
+                - role
+              properties:
+                telegramUserId:
+                  type: integer
+                  format: int64
+                  description: "Telegram user ID"
+                role:
+                  type: string
+                  enum: ["admin", "operator", "viewer"]
+                  description: "User role"
+                permissions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - namespace
+                      - resources
+                      - verbs
+                    properties:
+                      namespace:
+                        type: string
+                        description: "Kubernetes namespace (* for all)"
+                      resources:
+                        type: array
+                        items:
+                          type: string
+                          enum: ["pods", "deployments", "services"]
+                      verbs:
+                        type: array
+                        items:
+                          type: string
+                          enum: ["get", "list", "logs", "restart", "rollback", "scale"]
+                      selector:
+                        type: string
+                        description: "Label selector (e.g., app=frontend)"
+      additionalPrinterColumns:
+        - name: TelegramUserID
+          type: integer
+          jsonPath: .spec.telegramUserId
+        - name: Role
+          type: string
+          jsonPath: .spec.role
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
