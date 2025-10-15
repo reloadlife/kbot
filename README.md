@@ -283,8 +283,25 @@ docker build -t kubectl-bot:latest .
 ### Running Tests
 
 ```bash
+# Run all tests
+make test
+
+# Run tests with verbose output
+make test-verbose
+
+# Run tests with coverage report
+make test-coverage
+
+# Or use go directly
 go test -v ./...
 ```
+
+**Test Coverage:**
+- ✅ Config package: 100% coverage
+- ✅ RBAC validator: Core functions tested
+- ✅ RBAC manager: DeepCopy and utility functions tested
+- ✅ K8s client: GVR and utility functions tested
+- ✅ Bot handlers: Command parsing and formatting tested
 
 ## Configuration
 

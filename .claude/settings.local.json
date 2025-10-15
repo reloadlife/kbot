@@ -5,7 +5,10 @@
       "Bash(go get:*)",
       "Bash(go mod:*)",
       "Bash(go build:*)",
-      "Bash(tree:*)"
+      "Bash(tree:*)",
+      "Bash(make test:*)",
+      "Bash(make test-coverage:*)",
+      "Bash(make:*)"
     ],
     "deny": [],
     "ask": []
