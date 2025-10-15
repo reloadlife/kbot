@@ -8,7 +8,9 @@
       "Bash(tree:*)",
       "Bash(make test:*)",
       "Bash(make test-coverage:*)",
-      "Bash(make:*)"
+      "Bash(make:*)",
+      "Bash(go version)",
+      "Bash(go list:*)"
     ],
     "deny": [],
     "ask": []
