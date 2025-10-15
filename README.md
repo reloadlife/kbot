@@ -508,9 +508,9 @@ AGPL-3.0 License - see LICENSE file for details
 
 - [x] Helm chart
 - [x] Self-update feature
+- [ ] Docker Support
 - [ ] Multi-container support for logs
 - [ ] Exec into pods
-- [ ] Port-forwarding via Telegram
 - [ ] StatefulSet operations
 - [ ] Namespace creation/deletion
 - [ ] Resource metrics and monitoring
