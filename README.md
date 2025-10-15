@@ -6,6 +6,8 @@ A Kubernetes Telegram Bot that provides secure, RBAC-controlled access to Kubern
 
 - **Kubernetes-Native RBAC**: Permissions stored as CRDs in Kubernetes
 - **Fine-Grained Access Control**: Control access by namespace, resource, verb, and label selectors
+- **Group Chat Support**: Works in both private chats and Telegram groups with permission-based access
+- **Command Menu**: Automatic command registration in Telegram UI
 - **Secure**: Bootstrap admins, role-based permissions, selector enforcement
 - **Easy Deployment**: Single binary, Docker image, Kubernetes manifests
 - **GitOps-Friendly**: Permissions are version-controlled Kubernetes resources
@@ -162,10 +164,13 @@ helm install kbot kbot/kubectl-bot \
 
 ### Using the Bot
 
+#### In Private Chat
+
 1. **Start conversation**
    - Open Telegram and search for your bot
    - Send `/start`
    - You should see your role (admin if you're a bootstrap admin)
+   - The bot will display all available commands in the Telegram command menu
 
 2. **Grant permissions to other users**
 ```
@@ -193,6 +198,57 @@ helm install kbot kbot/kubectl-bot \
 # Scale deployment
 /scale api-deployment 3 -n staging
 ```
+
+#### In Group Chats
+
+The bot also works in Telegram group chats with permission-based access control:
+
+1. **Add the bot to your group**
+   - Add the bot to your Telegram group
+   - The bot will only respond to users who have permissions
+   - Unauthorized users' commands are silently ignored
+
+2. **Permission-based access**
+   - Only users with bootstrap admin or CRD permissions can use the bot
+   - Each user's actions are still subject to their specific permissions
+   - All operations are logged with user ID for audit purposes
+
+3. **Best practices for groups**
+   - Use groups for team collaboration on cluster operations
+   - Grant specific namespace access to team members
+   - Use label selectors to restrict access to specific applications
+   - Monitor bot logs for security audit trails
+
+**Example group workflow:**
+```
+# Admin adds bot to DevOps group
+# Admin grants team members access to staging namespace
+/grant 111111111 logs pods -n staging
+/grant 222222222 restart deployments -n staging
+
+# Team members can now use bot in the group
+User1: /pods staging
+Bot: [Lists pods in staging]
+
+User2: /logs api-pod-abc -n staging
+Bot: [Shows logs]
+
+# Unauthorized user tries to use bot
+User3: /pods staging
+Bot: [Silently ignores - no response]
+```
+
+### Bot Commands Menu
+
+The bot automatically registers all commands with Telegram, so users can:
+- See available commands by typing `/` in the chat
+- Get command descriptions in the Telegram UI
+- Use command autocomplete
+
+Commands are categorized as:
+- **Resource Queries**: pods, deployments, services, namespaces
+- **Operations**: logs, restart, rollback, scale
+- **Admin**: grant, revoke, permissions
 
 ## Permission Examples
 
@@ -317,9 +373,10 @@ go test -v ./...
 
 1. **Bootstrap Admins**: Initial admins are specified via `ADMIN_TELEGRAM_IDS` environment variable
 2. **Selector Enforcement**: When a permission includes a selector, resources must match it
-3. **Audit Logging**: All operations are logged with Telegram user ID
+3. **Audit Logging**: All operations are logged with Telegram user ID and chat context
 4. **In-Cluster RBAC**: The bot's ServiceAccount has minimal required K8s permissions
 5. **No External Database**: All data stored in Kubernetes (secure, auditable)
+6. **Group Chat Security**: Unauthorized users' commands are silently ignored in groups
 
 ## Troubleshooting
 

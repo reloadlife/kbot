@@ -41,6 +41,11 @@ func NewBot(cfg *config.Config, k8sClient *k8s.Client) (*Bot, error) {
 
 // Start starts the bot and begins processing updates
 func (b *Bot) Start(ctx context.Context) error {
+	// Set bot commands for UI
+	if err := b.setupCommands(); err != nil {
+		log.Printf("Warning: Failed to set bot commands: %v", err)
+	}
+
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
@@ -68,11 +73,26 @@ func (b *Bot) Start(ctx context.Context) error {
 // handleMessage processes incoming messages
 func (b *Bot) handleMessage(ctx context.Context, message *tgbotapi.Message) {
 	userID := message.From.ID
+	isGroup := message.Chat.IsGroup() || message.Chat.IsSuperGroup()
 
-	log.Printf("Received message from user %d: %s", userID, message.Text)
+	log.Printf("Received message from user %d in chat %d (group=%v): %s",
+		userID, message.Chat.ID, isGroup, message.Text)
+
+	// Check if user has any permissions (for groups)
+	if isGroup {
+		hasPermission := b.hasAnyPermission(ctx, userID)
+		if !hasPermission {
+			// Silently ignore messages from unauthorized users in groups
+			log.Printf("Ignoring message from unauthorized user %d in group %d", userID, message.Chat.ID)
+			return
+		}
+	}
 
 	if !message.IsCommand() {
-		b.sendMessage(message.Chat.ID, "Please use a command. Type /help for available commands.")
+		// Only respond to non-command messages in private chats
+		if !isGroup {
+			b.sendMessage(message.Chat.ID, "Please use a command. Type /help for available commands.")
+		}
 		return
 	}
 
@@ -131,4 +151,49 @@ func (b *Bot) getUserRole(ctx context.Context, userID int64) string {
 	}
 
 	return permission.Spec.Role
+}
+
+// hasAnyPermission checks if user has any permissions (bootstrap admin or CRD permissions)
+func (b *Bot) hasAnyPermission(ctx context.Context, userID int64) bool {
+	// Check bootstrap admin
+	if b.rbac.IsBootstrapAdmin(userID) {
+		return true
+	}
+
+	// Check CRD permissions
+	permission, err := b.rbac.GetUserPermission(ctx, userID)
+	if err != nil {
+		return false
+	}
+
+	// User has permissions if role is set and has at least one permission entry
+	return permission.Spec.Role != "" && len(permission.Spec.Permissions) > 0
+}
+
+// setupCommands sets up bot commands for Telegram UI
+func (b *Bot) setupCommands() error {
+	commands := []tgbotapi.BotCommand{
+		{Command: "start", Description: "Start the bot and check your permissions"},
+		{Command: "help", Description: "Show help and available commands"},
+		{Command: "namespaces", Description: "List accessible namespaces"},
+		{Command: "pods", Description: "List pods in a namespace"},
+		{Command: "deployments", Description: "List deployments in a namespace"},
+		{Command: "services", Description: "List services in a namespace"},
+		{Command: "logs", Description: "Get pod logs"},
+		{Command: "restart", Description: "Restart a deployment"},
+		{Command: "rollback", Description: "Rollback a deployment"},
+		{Command: "scale", Description: "Scale a deployment"},
+		{Command: "grant", Description: "Grant permissions to a user (admin only)"},
+		{Command: "revoke", Description: "Revoke permissions from a user (admin only)"},
+		{Command: "permissions", Description: "View user permissions"},
+	}
+
+	cfg := tgbotapi.NewSetMyCommands(commands...)
+	_, err := b.api.Request(cfg)
+	if err != nil {
+		return err
+	}
+
+	log.Println("Bot commands registered successfully")
+	return nil
 }
