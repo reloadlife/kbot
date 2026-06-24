@@ -51,7 +51,9 @@ func newTestValidator(t *testing.T, obj *unstructured.Unstructured) *Validator {
 // restricted by selector "app=frontend" must have that selector handed back so
 // list queries are scoped, instead of being dropped (which leaked all pods).
 func TestSelectorReturnedForList(t *testing.T) {
-	v := newTestValidator(t, tbpObject(123, "viewer", "app=frontend"))
+	// No top-level role: only the selector-restricted raw permission is in effect,
+	// so decide must return EffectiveSelector and not be shadowed by a broad grant.
+	v := newTestValidator(t, tbpObject(123, "", "app=frontend"))
 
 	dec, err := v.CheckPermission(context.Background(), PermissionCheck{
 		TelegramUserID: 123,
