@@ -3,597 +3,718 @@ package bot
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"kubectl-bot/internal/k8s"
 	"kubectl-bot/internal/rbac"
+
+	corev1 "k8s.io/api/core/v1"
 )
+
+// maxReplicas caps the /scale command as a guardrail against fat-fingering.
+const maxReplicas = 100
+
+// parsedArgs holds positional arguments plus recognised flags shared across
+// commands.
+type parsedArgs struct {
+	positional []string
+	namespace  string
+	selector   string
+	container  string
+	tail       int64
+	previous   bool
+	since      int64
+}
+
+// parseArgs tokenises a command argument string into positionals and flags.
+func parseArgs(raw string) parsedArgs {
+	p := parsedArgs{tail: 100}
+	toks := strings.Fields(raw)
+	for i := 0; i < len(toks); i++ {
+		switch toks[i] {
+		case "-n", "--namespace":
+			if i+1 < len(toks) {
+				p.namespace = toks[i+1]
+				i++
+			}
+		case "-l", "--selector":
+			if i+1 < len(toks) {
+				p.selector = toks[i+1]
+				i++
+			}
+		case "-c", "--container":
+			if i+1 < len(toks) {
+				p.container = toks[i+1]
+				i++
+			}
+		case "--tail":
+			if i+1 < len(toks) {
+				if n, err := strconv.ParseInt(toks[i+1], 10, 64); err == nil {
+					p.tail = n
+				}
+				i++
+			}
+		case "--since":
+			if i+1 < len(toks) {
+				if n, err := strconv.ParseInt(toks[i+1], 10, 64); err == nil {
+					p.since = n
+				}
+				i++
+			}
+		case "--previous", "-p":
+			p.previous = true
+		default:
+			p.positional = append(p.positional, toks[i])
+		}
+	}
+	return p
+}
+
+// combineSelectors ANDs a mandatory selector (from the permission) with an
+// optional user-supplied one. Either may be empty.
+func combineSelectors(required, user string) string {
+	switch {
+	case required == "":
+		return user
+	case user == "":
+		return required
+	default:
+		return required + "," + user
+	}
+}
+
+// formatAge renders a duration like kubectl's AGE column.
+func formatAge(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
 
 // handleStart handles the /start command
 func (b *Bot) handleStart(ctx context.Context, message *tgbotapi.Message) {
 	userID := message.From.ID
 	role := b.getUserRole(ctx, userID)
 
-	response := fmt.Sprintf("👋 Welcome to Kubernetes Bot!\n\n"+
-		"Your role: *%s*\n"+
-		"User ID: `%d`\n\n"+
-		"Type /help to see available commands.", role, userID)
-
-	b.sendMessage(message.Chat.ID, response)
+	b.send(message.Chat.ID, fmt.Sprintf("👋 Welcome to Kubernetes Bot!\n\nYour role: %s\nUser ID: %s\n\nType /help to see available commands.",
+		bold(role), code(strconv.FormatInt(userID, 10))))
 }
 
 // handleHelp handles the /help command
 func (b *Bot) handleHelp(ctx context.Context, message *tgbotapi.Message) {
-	help := `*Available Commands:*
+	help := `<b>Available Commands</b>
 
-*Resource Queries:*
-/namespaces - List accessible namespaces
-/pods [namespace] - List pods
-/deployments [namespace] - List deployments
-/services [namespace] - List services
+<b>Resource Queries:</b>
+/namespaces — list accessible namespaces
+/pods [namespace] [-l selector] — list pods
+/deployments [namespace] [-l selector] — list deployments
+/services [namespace] — list services
+/describe &lt;pod|deployment&gt; &lt;name&gt; [-n ns] — show details
+/events [namespace] — recent events
+/top [namespace] — pod CPU/memory usage
 
-*Operations:*
-/logs <pod> [-n <namespace>] - Get pod logs
-/restart <deployment> [-n <namespace>] - Restart deployment
-/rollback <deployment> [-n <namespace>] - Rollback deployment
-/scale <deployment> <replicas> [-n <namespace>] - Scale deployment
+<b>Operations (confirmed):</b>
+/logs &lt;pod&gt; [-n ns] [-c container] [--tail N] [--previous] [--since secs]
+/restart &lt;deployment&gt; [-n ns]
+/rollback &lt;deployment&gt; [-n ns]
+/scale &lt;deployment&gt; &lt;replicas&gt; [-n ns]
 
-*Admin Commands:*
-/grant <user_id> <verb> <resource> [-n <namespace>] [-l <selector>] - Grant permission
-/revoke <user_id> <verb> <resource> [-n <namespace>] - Revoke permission
-/permissions [user_id] - Show user permissions
-/selfupdate - Update bot to latest image
+<b>Admin Commands:</b>
+/grant &lt;user_id&gt; &lt;verb&gt; &lt;resource&gt; [-n ns] [-l selector]
+/revoke &lt;user_id&gt; &lt;verb&gt; &lt;resource&gt; -n ns
+/role &lt;user_id&gt; &lt;admin|operator|viewer&gt;
+/permissions [user_id]
+/users — list all permission holders
+/selfupdate — restart the bot to pull the latest image
 
-*Examples:*
-/pods production
-/logs frontend-pod-abc -n production
-/restart api-deployment -n staging
-/grant 123456789 logs pods -n production -l app=frontend
-`
+<b>Examples:</b>
+<code>/pods production</code>
+<code>/logs frontend-abc -n production -c nginx --tail 200</code>
+<code>/scale api 3 -n staging</code>
+<code>/grant 123456789 logs pods -n production -l app=frontend</code>`
 
-	b.sendMessage(message.Chat.ID, help)
+	b.send(message.Chat.ID, help)
 }
 
 // handleNamespaces handles the /namespaces command
 func (b *Bot) handleNamespaces(ctx context.Context, message *tgbotapi.Message) {
-	userID := message.From.ID
-
-	namespaces, err := b.validator.ValidateAndGetNamespaces(ctx, userID)
+	namespaces, err := b.validator.ValidateAndGetNamespaces(ctx, message.From.ID)
 	if err != nil {
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ Error: %v", err))
+		b.fail(message.Chat.ID, "List namespaces", err)
 		return
 	}
-
 	if len(namespaces) == 0 {
-		b.sendMessage(message.Chat.ID, "No accessible namespaces")
+		b.send(message.Chat.ID, "No accessible namespaces.")
 		return
 	}
 
-	response := "*Accessible Namespaces:*\n"
+	sort.Strings(namespaces)
+	var sb strings.Builder
+	sb.WriteString("<b>Accessible Namespaces:</b>\n")
 	for _, ns := range namespaces {
-		response += fmt.Sprintf("- %s\n", ns)
+		sb.WriteString("• " + code(ns) + "\n")
 	}
+	b.send(message.Chat.ID, sb.String())
+}
 
-	b.sendMessage(message.Chat.ID, response)
+// resolveListAccess checks list permission for a resource and returns the
+// selector that must be applied to the query, or false if denied.
+func (b *Bot) resolveListAccess(ctx context.Context, chatID, userID int64, namespace, resource, userSelector string) (string, bool) {
+	dec, err := b.validator.CheckPermission(ctx, rbac.PermissionCheck{
+		TelegramUserID: userID,
+		Namespace:      namespace,
+		Resource:       resource,
+		Verb:           "list",
+	})
+	if err != nil || !dec.Allowed {
+		b.send(chatID, rbac.FormatPermissionDenied(dec.Reason))
+		return "", false
+	}
+	return combineSelectors(dec.EffectiveSelector, userSelector), true
 }
 
 // handlePods handles the /pods command
 func (b *Bot) handlePods(ctx context.Context, message *tgbotapi.Message) {
-	userID := message.From.ID
-	args := strings.Fields(message.CommandArguments())
+	p := parseArgs(message.CommandArguments())
+	namespace := rbac.NormalizeNamespace(firstOr(p.positional, p.namespace))
 
-	namespace := "default"
-	if len(args) > 0 {
-		namespace = args[0]
-	}
-
-	namespace = rbac.NormalizeNamespace(namespace)
-
-	// Check permission
-	allowed, reason, err := b.validator.CheckPermission(ctx, rbac.PermissionCheck{
-		TelegramUserID: userID,
-		Namespace:      namespace,
-		Resource:       "pods",
-		Verb:           "list",
-	})
-
-	if err != nil || !allowed {
-		b.sendMessage(message.Chat.ID, rbac.FormatPermissionDenied(reason))
+	selector, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "pods", p.selector)
+	if !ok {
 		return
 	}
 
-	// List pods
-	pods, err := b.k8sClient.ListPods(ctx, namespace, "")
+	pods, err := b.k8sClient.ListPods(ctx, namespace, selector)
 	if err != nil {
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ Error: %v", err))
+		b.fail(message.Chat.ID, "List pods", err)
 		return
 	}
-
 	if len(pods.Items) == 0 {
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("No pods found in namespace *%s*", namespace))
+		b.send(message.Chat.ID, "No pods found in namespace "+code(namespace))
 		return
 	}
 
-	response := fmt.Sprintf("*Pods in namespace %s:*\n\n", namespace)
-	for _, pod := range pods.Items {
-		status := string(pod.Status.Phase)
-		response += fmt.Sprintf("📦 `%s`\n   Status: %s\n\n", pod.Name, status)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("<b>Pods in %s</b> (%d)\n\n", htmlEscape(namespace), len(pods.Items)))
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		ready, total, restarts := podReadiness(pod)
+		sb.WriteString(fmt.Sprintf("📦 %s\n   %s • %d/%d ready • %d restarts • %s\n\n",
+			code(pod.Name), htmlEscape(string(pod.Status.Phase)), ready, total, restarts, formatAge(pod.CreationTimestamp.Time)))
 	}
+	b.send(message.Chat.ID, sb.String())
+}
 
-	b.sendMessage(message.Chat.ID, response)
+// podReadiness returns ready/total container counts and total restart count.
+func podReadiness(pod *corev1.Pod) (ready, total int, restarts int) {
+	total = len(pod.Status.ContainerStatuses)
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Ready {
+			ready++
+		}
+		restarts += int(cs.RestartCount)
+	}
+	return ready, total, restarts
 }
 
 // handleDeployments handles the /deployments command
 func (b *Bot) handleDeployments(ctx context.Context, message *tgbotapi.Message) {
-	userID := message.From.ID
-	args := strings.Fields(message.CommandArguments())
+	p := parseArgs(message.CommandArguments())
+	namespace := rbac.NormalizeNamespace(firstOr(p.positional, p.namespace))
 
-	namespace := "default"
-	if len(args) > 0 {
-		namespace = args[0]
-	}
-
-	namespace = rbac.NormalizeNamespace(namespace)
-
-	// Check permission
-	allowed, reason, err := b.validator.CheckPermission(ctx, rbac.PermissionCheck{
-		TelegramUserID: userID,
-		Namespace:      namespace,
-		Resource:       "deployments",
-		Verb:           "list",
-	})
-
-	if err != nil || !allowed {
-		b.sendMessage(message.Chat.ID, rbac.FormatPermissionDenied(reason))
+	selector, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "deployments", p.selector)
+	if !ok {
 		return
 	}
 
-	// List deployments
-	deployments, err := b.k8sClient.ListDeployments(ctx, namespace, "")
+	deployments, err := b.k8sClient.ListDeployments(ctx, namespace, selector)
 	if err != nil {
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ Error: %v", err))
+		b.fail(message.Chat.ID, "List deployments", err)
 		return
 	}
-
 	if len(deployments.Items) == 0 {
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("No deployments found in namespace *%s*", namespace))
+		b.send(message.Chat.ID, "No deployments found in namespace "+code(namespace))
 		return
 	}
 
-	response := fmt.Sprintf("*Deployments in namespace %s:*\n\n", namespace)
-	for _, dep := range deployments.Items {
-		replicas := int32(0)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("<b>Deployments in %s</b> (%d)\n\n", htmlEscape(namespace), len(deployments.Items)))
+	for i := range deployments.Items {
+		dep := &deployments.Items[i]
+		desired := int32(0)
 		if dep.Spec.Replicas != nil {
-			replicas = *dep.Spec.Replicas
+			desired = *dep.Spec.Replicas
 		}
-		response += fmt.Sprintf("🚀 `%s`\n   Replicas: %d/%d\n\n",
-			dep.Name, dep.Status.ReadyReplicas, replicas)
+		sb.WriteString(fmt.Sprintf("🚀 %s\n   %d/%d ready • %s\n\n",
+			code(dep.Name), dep.Status.ReadyReplicas, desired, formatAge(dep.CreationTimestamp.Time)))
 	}
-
-	b.sendMessage(message.Chat.ID, response)
+	b.send(message.Chat.ID, sb.String())
 }
 
 // handleServices handles the /services command
 func (b *Bot) handleServices(ctx context.Context, message *tgbotapi.Message) {
-	userID := message.From.ID
-	args := strings.Fields(message.CommandArguments())
+	p := parseArgs(message.CommandArguments())
+	namespace := rbac.NormalizeNamespace(firstOr(p.positional, p.namespace))
 
-	namespace := "default"
-	if len(args) > 0 {
-		namespace = args[0]
-	}
-
-	namespace = rbac.NormalizeNamespace(namespace)
-
-	// Check permission
-	allowed, reason, err := b.validator.CheckPermission(ctx, rbac.PermissionCheck{
-		TelegramUserID: userID,
-		Namespace:      namespace,
-		Resource:       "services",
-		Verb:           "list",
-	})
-
-	if err != nil || !allowed {
-		b.sendMessage(message.Chat.ID, rbac.FormatPermissionDenied(reason))
+	selector, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "services", p.selector)
+	if !ok {
 		return
 	}
 
-	// List services
-	services, err := b.k8sClient.ListServices(ctx, namespace, "")
+	services, err := b.k8sClient.ListServices(ctx, namespace, selector)
 	if err != nil {
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ Error: %v", err))
+		b.fail(message.Chat.ID, "List services", err)
 		return
 	}
-
 	if len(services.Items) == 0 {
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("No services found in namespace *%s*", namespace))
+		b.send(message.Chat.ID, "No services found in namespace "+code(namespace))
 		return
 	}
 
-	response := fmt.Sprintf("*Services in namespace %s:*\n\n", namespace)
-	for _, svc := range services.Items {
-		response += fmt.Sprintf("🌐 `%s`\n   Type: %s\n\n", svc.Name, svc.Spec.Type)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("<b>Services in %s</b> (%d)\n\n", htmlEscape(namespace), len(services.Items)))
+	for i := range services.Items {
+		svc := &services.Items[i]
+		sb.WriteString(fmt.Sprintf("🌐 %s\n   %s • %s\n\n",
+			code(svc.Name), htmlEscape(string(svc.Spec.Type)), htmlEscape(svc.Spec.ClusterIP)))
 	}
-
-	b.sendMessage(message.Chat.ID, response)
+	b.send(message.Chat.ID, sb.String())
 }
 
 // handleLogs handles the /logs command
 func (b *Bot) handleLogs(ctx context.Context, message *tgbotapi.Message) {
-	userID := message.From.ID
-	args := strings.Fields(message.CommandArguments())
-
-	if len(args) == 0 {
-		b.sendMessage(message.Chat.ID, "Usage: /logs <pod> [-n <namespace>]")
+	p := parseArgs(message.CommandArguments())
+	if len(p.positional) == 0 {
+		b.send(message.Chat.ID, "Usage: /logs &lt;pod&gt; [-n ns] [-c container] [--tail N] [--previous] [--since secs]")
 		return
 	}
+	podName := p.positional[0]
+	namespace := rbac.NormalizeNamespace(p.namespace)
 
-	podName := args[0]
-	namespace := "default"
-
-	// Parse flags
-	for i := 1; i < len(args); i++ {
-		if args[i] == "-n" && i+1 < len(args) {
-			namespace = args[i+1]
-			i++
-		}
-	}
-
-	namespace = rbac.NormalizeNamespace(namespace)
-
-	// Check permission
-	allowed, reason, err := b.validator.CheckPermission(ctx, rbac.PermissionCheck{
-		TelegramUserID: userID,
+	dec, err := b.validator.CheckPermission(ctx, rbac.PermissionCheck{
+		TelegramUserID: message.From.ID,
 		Namespace:      namespace,
 		Resource:       "pods",
 		Verb:           "logs",
 		ResourceName:   podName,
 	})
-
-	if err != nil || !allowed {
-		b.sendMessage(message.Chat.ID, rbac.FormatPermissionDenied(reason))
+	if err != nil || !dec.Allowed {
+		b.send(message.Chat.ID, rbac.FormatPermissionDenied(dec.Reason))
 		return
 	}
 
-	// Get logs (last 100 lines)
-	logs, err := b.k8sClient.GetPodLogs(ctx, namespace, podName, 100)
+	logs, err := b.k8sClient.GetPodLogs(ctx, namespace, podName, k8sLogOptions(p))
+	if err != nil && logs == "" {
+		b.fail(message.Chat.ID, "Get logs", err)
+		return
+	}
+	if strings.TrimSpace(logs) == "" {
+		b.send(message.Chat.ID, "No log output for "+code(podName))
+		return
+	}
+
+	header := fmt.Sprintf("<b>Logs: %s</b> (ns %s)", htmlEscape(podName), htmlEscape(namespace))
+
+	// Short logs render inline; anything that wouldn't fit a single message is
+	// uploaded as a .log file so nothing is lost to truncation.
+	if len([]rune(logs)) <= 3500 {
+		b.send(message.Chat.ID, header+"\n"+pre(logs))
+		return
+	}
+
+	filename := sanitizeFilename(fmt.Sprintf("%s-%s.log", podName, p.container))
+	b.sendDocument(message.Chat.ID, filename, header, []byte(logs))
+}
+
+// sanitizeFilename keeps a filename safe and tidy: alphanumerics, dash, dot,
+// underscore only; trailing separators trimmed.
+func sanitizeFilename(name string) string {
+	var sb strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			sb.WriteRune(r)
+		default:
+			sb.WriteRune('_')
+		}
+	}
+	out := strings.Trim(sb.String(), "-_.")
+	if out == "" || out == ".log" {
+		return "pod.log"
+	}
+	return out
+}
+
+// k8sLogOptions maps parsed flags onto the k8s log option struct.
+func k8sLogOptions(p parsedArgs) k8s.LogOptions {
+	return k8s.LogOptions{Container: p.container, TailLines: p.tail, Previous: p.previous, SinceSeconds: p.since}
+}
+
+// handleDescribe handles /describe <pod|deployment> <name>
+func (b *Bot) handleDescribe(ctx context.Context, message *tgbotapi.Message) {
+	p := parseArgs(message.CommandArguments())
+	if len(p.positional) < 2 {
+		b.send(message.Chat.ID, "Usage: /describe &lt;pod|deployment&gt; &lt;name&gt; [-n ns]")
+		return
+	}
+	kind := strings.ToLower(p.positional[0])
+	name := p.positional[1]
+	namespace := rbac.NormalizeNamespace(p.namespace)
+
+	resource := ""
+	switch kind {
+	case "pod", "pods":
+		resource = "pods"
+	case "deployment", "deployments", "deploy":
+		resource = "deployments"
+	default:
+		b.send(message.Chat.ID, "First argument must be 'pod' or 'deployment'.")
+		return
+	}
+
+	dec, err := b.validator.CheckPermission(ctx, rbac.PermissionCheck{
+		TelegramUserID: message.From.ID,
+		Namespace:      namespace,
+		Resource:       resource,
+		Verb:           "get",
+		ResourceName:   name,
+	})
+	if err != nil || !dec.Allowed {
+		b.send(message.Chat.ID, rbac.FormatPermissionDenied(dec.Reason))
+		return
+	}
+
+	if resource == "pods" {
+		pod, err := b.k8sClient.GetPod(ctx, namespace, name)
+		if err != nil {
+			b.fail(message.Chat.ID, "Describe pod", err)
+			return
+		}
+		b.send(message.Chat.ID, describePod(pod))
+		return
+	}
+
+	dep, err := b.k8sClient.GetDeployment(ctx, namespace, name)
 	if err != nil {
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ Error: %v", err))
+		b.fail(message.Chat.ID, "Describe deployment", err)
+		return
+	}
+	b.send(message.Chat.ID, describeDeployment(dep))
+}
+
+// handleEvents handles /events [namespace]
+func (b *Bot) handleEvents(ctx context.Context, message *tgbotapi.Message) {
+	p := parseArgs(message.CommandArguments())
+	namespace := rbac.NormalizeNamespace(firstOr(p.positional, p.namespace))
+
+	if _, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "pods", ""); !ok {
 		return
 	}
 
-	response := fmt.Sprintf("*Logs for pod %s (namespace: %s):*\n```\n%s\n```", podName, namespace, logs)
-
-	// Telegram message limit is 4096 chars
-	if len(response) > 4000 {
-		response = response[:4000] + "\n...(truncated)\n```"
+	events, err := b.k8sClient.ListEvents(ctx, namespace)
+	if err != nil {
+		b.fail(message.Chat.ID, "List events", err)
+		return
+	}
+	if len(events) == 0 {
+		b.send(message.Chat.ID, "No events in namespace "+code(namespace))
+		return
 	}
 
-	b.sendMessage(message.Chat.ID, response)
+	// Show the most recent 20.
+	if len(events) > 20 {
+		events = events[len(events)-20:]
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("<b>Recent events in %s</b>\n\n", htmlEscape(namespace)))
+	for i := range events {
+		e := &events[i]
+		icon := "ℹ️"
+		if e.Type == "Warning" {
+			icon = "⚠️"
+		}
+		sb.WriteString(fmt.Sprintf("%s %s/%s — %s\n   %s\n\n",
+			icon, htmlEscape(e.InvolvedObject.Kind), htmlEscape(e.InvolvedObject.Name),
+			htmlEscape(e.Reason), htmlEscape(e.Message)))
+	}
+	b.send(message.Chat.ID, sb.String())
+}
+
+// handleTop handles /top [namespace]
+func (b *Bot) handleTop(ctx context.Context, message *tgbotapi.Message) {
+	p := parseArgs(message.CommandArguments())
+	namespace := rbac.NormalizeNamespace(firstOr(p.positional, p.namespace))
+
+	if _, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "pods", ""); !ok {
+		return
+	}
+
+	metrics, err := b.k8sClient.GetPodMetrics(ctx, namespace)
+	if err != nil {
+		b.send(message.Chat.ID, "📊 Pod metrics unavailable. Is metrics-server installed in the cluster?")
+		return
+	}
+	if len(metrics) == 0 {
+		b.send(message.Chat.ID, "No pod metrics in namespace "+code(namespace))
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("<b>Resource usage in %s</b>\n\n", htmlEscape(namespace)))
+	for _, m := range metrics {
+		sb.WriteString(fmt.Sprintf("📦 %s\n   CPU %s • Mem %s\n", code(m.Name), htmlEscape(m.CPU), htmlEscape(m.Memory)))
+	}
+	b.send(message.Chat.ID, sb.String())
 }
 
 // handleRestart handles the /restart command
 func (b *Bot) handleRestart(ctx context.Context, message *tgbotapi.Message) {
-	userID := message.From.ID
-	args := strings.Fields(message.CommandArguments())
-
-	if len(args) == 0 {
-		b.sendMessage(message.Chat.ID, "Usage: /restart <deployment> [-n <namespace>]")
-		return
-	}
-
-	deploymentName := args[0]
-	namespace := "default"
-
-	// Parse flags
-	for i := 1; i < len(args); i++ {
-		if args[i] == "-n" && i+1 < len(args) {
-			namespace = args[i+1]
-			i++
-		}
-	}
-
-	namespace = rbac.NormalizeNamespace(namespace)
-
-	// Check permission
-	allowed, reason, err := b.validator.CheckPermission(ctx, rbac.PermissionCheck{
-		TelegramUserID: userID,
-		Namespace:      namespace,
-		Resource:       "deployments",
-		Verb:           "restart",
-		ResourceName:   deploymentName,
-	})
-
-	if err != nil || !allowed {
-		b.sendMessage(message.Chat.ID, rbac.FormatPermissionDenied(reason))
-		return
-	}
-
-	// Restart deployment
-	err = b.k8sClient.RestartDeployment(ctx, namespace, deploymentName)
-	if err != nil {
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ Error: %v", err))
-		return
-	}
-
-	b.sendMessage(message.Chat.ID, fmt.Sprintf("✅ Deployment `%s` restarted in namespace *%s*", deploymentName, namespace))
+	b.requestDeploymentAction(ctx, message, actionRestart)
 }
 
 // handleRollback handles the /rollback command
 func (b *Bot) handleRollback(ctx context.Context, message *tgbotapi.Message) {
-	userID := message.From.ID
-	args := strings.Fields(message.CommandArguments())
+	b.requestDeploymentAction(ctx, message, actionRollback)
+}
 
-	if len(args) == 0 {
-		b.sendMessage(message.Chat.ID, "Usage: /rollback <deployment> [-n <namespace>]")
+// requestDeploymentAction validates a restart/rollback and prompts for
+// confirmation before executing.
+func (b *Bot) requestDeploymentAction(ctx context.Context, message *tgbotapi.Message, kind string) {
+	p := parseArgs(message.CommandArguments())
+	if len(p.positional) == 0 {
+		b.send(message.Chat.ID, fmt.Sprintf("Usage: /%s &lt;deployment&gt; [-n ns]", kind))
 		return
 	}
+	name := p.positional[0]
+	namespace := rbac.NormalizeNamespace(p.namespace)
 
-	deploymentName := args[0]
-	namespace := "default"
-
-	// Parse flags
-	for i := 1; i < len(args); i++ {
-		if args[i] == "-n" && i+1 < len(args) {
-			namespace = args[i+1]
-			i++
-		}
-	}
-
-	namespace = rbac.NormalizeNamespace(namespace)
-
-	// Check permission
-	allowed, reason, err := b.validator.CheckPermission(ctx, rbac.PermissionCheck{
-		TelegramUserID: userID,
+	dec, err := b.validator.CheckPermission(ctx, rbac.PermissionCheck{
+		TelegramUserID: message.From.ID,
 		Namespace:      namespace,
 		Resource:       "deployments",
-		Verb:           "rollback",
-		ResourceName:   deploymentName,
+		Verb:           kind,
+		ResourceName:   name,
 	})
-
-	if err != nil || !allowed {
-		b.sendMessage(message.Chat.ID, rbac.FormatPermissionDenied(reason))
+	if err != nil || !dec.Allowed {
+		b.send(message.Chat.ID, rbac.FormatPermissionDenied(dec.Reason))
 		return
 	}
 
-	// Rollback deployment
-	err = b.k8sClient.RollbackDeployment(ctx, namespace, deploymentName)
-	if err != nil {
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ Error: %v", err))
-		return
-	}
-
-	b.sendMessage(message.Chat.ID, fmt.Sprintf("✅ Deployment `%s` rolled back in namespace *%s*", deploymentName, namespace))
+	summary := fmt.Sprintf("%s deployment %s in namespace %s?", titleCase(kind), code(name), code(namespace))
+	b.requestConfirmation(message.Chat.ID, message.From.ID, &pendingAction{
+		kind: kind, namespace: namespace, name: name,
+	}, summary)
 }
 
 // handleScale handles the /scale command
 func (b *Bot) handleScale(ctx context.Context, message *tgbotapi.Message) {
-	userID := message.From.ID
-	args := strings.Fields(message.CommandArguments())
-
-	if len(args) < 2 {
-		b.sendMessage(message.Chat.ID, "Usage: /scale <deployment> <replicas> [-n <namespace>]")
+	p := parseArgs(message.CommandArguments())
+	if len(p.positional) < 2 {
+		b.send(message.Chat.ID, "Usage: /scale &lt;deployment&gt; &lt;replicas&gt; [-n ns]")
 		return
 	}
-
-	deploymentName := args[0]
-	replicas, err := strconv.ParseInt(args[1], 10, 32)
-	if err != nil {
-		b.sendMessage(message.Chat.ID, "❌ Invalid replica count")
+	name := p.positional[0]
+	replicas, err := strconv.ParseInt(p.positional[1], 10, 32)
+	if err != nil || replicas < 0 {
+		b.send(message.Chat.ID, "❌ Replica count must be a non-negative integer.")
 		return
 	}
-
-	namespace := "default"
-
-	// Parse flags
-	for i := 2; i < len(args); i++ {
-		if args[i] == "-n" && i+1 < len(args) {
-			namespace = args[i+1]
-			i++
-		}
+	if replicas > maxReplicas {
+		b.send(message.Chat.ID, fmt.Sprintf("❌ Replica count exceeds the safety limit of %d.", maxReplicas))
+		return
 	}
+	namespace := rbac.NormalizeNamespace(p.namespace)
 
-	namespace = rbac.NormalizeNamespace(namespace)
-
-	// Check permission
-	allowed, reason, err := b.validator.CheckPermission(ctx, rbac.PermissionCheck{
-		TelegramUserID: userID,
+	dec, err := b.validator.CheckPermission(ctx, rbac.PermissionCheck{
+		TelegramUserID: message.From.ID,
 		Namespace:      namespace,
 		Resource:       "deployments",
 		Verb:           "scale",
-		ResourceName:   deploymentName,
+		ResourceName:   name,
 	})
-
-	if err != nil || !allowed {
-		b.sendMessage(message.Chat.ID, rbac.FormatPermissionDenied(reason))
+	if err != nil || !dec.Allowed {
+		b.send(message.Chat.ID, rbac.FormatPermissionDenied(dec.Reason))
 		return
 	}
 
-	// Scale deployment
-	err = b.k8sClient.ScaleDeployment(ctx, namespace, deploymentName, int32(replicas))
-	if err != nil {
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ Error: %v", err))
-		return
-	}
-
-	b.sendMessage(message.Chat.ID, fmt.Sprintf("✅ Deployment `%s` scaled to %d replicas in namespace *%s*",
-		deploymentName, replicas, namespace))
+	summary := fmt.Sprintf("Scale deployment %s to %d replicas in namespace %s?", code(name), replicas, code(namespace))
+	b.requestConfirmation(message.Chat.ID, message.From.ID, &pendingAction{
+		kind: actionScale, namespace: namespace, name: name, replicas: int32(replicas),
+	}, summary)
 }
 
 // handleGrant handles the /grant command (admin only)
 func (b *Bot) handleGrant(ctx context.Context, message *tgbotapi.Message) {
-	userID := message.From.ID
-	args := strings.Fields(message.CommandArguments())
-
-	// Check if user is admin
-	if !b.rbac.IsBootstrapAdmin(userID) {
-		permission, err := b.rbac.GetUserPermission(ctx, userID)
-		if err != nil || permission.Spec.Role != "admin" {
-			b.sendMessage(message.Chat.ID, "❌ Admin access required")
-			return
-		}
-	}
-
-	if len(args) < 3 {
-		b.sendMessage(message.Chat.ID, "Usage: /grant <user_id> <verb> <resource> [-n <namespace>] [-l <selector>]")
+	if !b.isAdmin(ctx, message.From.ID) {
+		b.send(message.Chat.ID, "❌ Admin access required.")
 		return
 	}
-
-	targetUserID, err := strconv.ParseInt(args[0], 10, 64)
+	p := parseArgs(message.CommandArguments())
+	if len(p.positional) < 3 {
+		b.send(message.Chat.ID, "Usage: /grant &lt;user_id&gt; &lt;verb&gt; &lt;resource&gt; [-n ns] [-l selector]")
+		return
+	}
+	targetUserID, err := strconv.ParseInt(p.positional[0], 10, 64)
 	if err != nil {
-		b.sendMessage(message.Chat.ID, "❌ Invalid user ID")
+		b.send(message.Chat.ID, "❌ Invalid user ID.")
+		return
+	}
+	verb, resource := p.positional[1], p.positional[2]
+	namespace := p.namespace
+	if namespace == "" {
+		namespace = "*"
+	}
+
+	if err := b.rbac.GrantPermission(ctx, targetUserID, namespace, resource, verb, p.selector); err != nil {
+		b.fail(message.Chat.ID, "Grant permission", err)
 		return
 	}
 
-	verb := args[1]
-	resource := args[2]
-	namespace := "*"
-	selector := ""
-
-	// Parse flags
-	for i := 3; i < len(args); i++ {
-		if args[i] == "-n" && i+1 < len(args) {
-			namespace = args[i+1]
-			i++
-		} else if args[i] == "-l" && i+1 < len(args) {
-			selector = args[i+1]
-			i++
-		}
+	resp := fmt.Sprintf("✅ Granted to user %s\n\nNamespace: %s\nResource: %s\nVerb: %s",
+		code(p.positional[0]), code(namespace), code(resource), code(verb))
+	if p.selector != "" {
+		resp += "\nSelector: " + code(p.selector)
 	}
-
-	// Grant permission
-	err = b.rbac.GrantPermission(ctx, targetUserID, namespace, resource, verb, selector)
-	if err != nil {
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ Error: %v", err))
-		return
-	}
-
-	response := fmt.Sprintf("✅ Permission granted to user `%d`\n\n"+
-		"Namespace: %s\n"+
-		"Resource: %s\n"+
-		"Verb: %s\n",
-		targetUserID, namespace, resource, verb)
-
-	if selector != "" {
-		response += fmt.Sprintf("Selector: %s\n", selector)
-	}
-
-	b.sendMessage(message.Chat.ID, response)
+	b.send(message.Chat.ID, resp)
 }
 
 // handleRevoke handles the /revoke command (admin only)
 func (b *Bot) handleRevoke(ctx context.Context, message *tgbotapi.Message) {
-	userID := message.From.ID
-	args := strings.Fields(message.CommandArguments())
-
-	// Check if user is admin
-	if !b.rbac.IsBootstrapAdmin(userID) {
-		permission, err := b.rbac.GetUserPermission(ctx, userID)
-		if err != nil || permission.Spec.Role != "admin" {
-			b.sendMessage(message.Chat.ID, "❌ Admin access required")
-			return
-		}
-	}
-
-	if len(args) < 4 {
-		b.sendMessage(message.Chat.ID, "Usage: /revoke <user_id> <verb> <resource> -n <namespace>")
+	if !b.isAdmin(ctx, message.From.ID) {
+		b.send(message.Chat.ID, "❌ Admin access required.")
 		return
 	}
-
-	targetUserID, err := strconv.ParseInt(args[0], 10, 64)
+	p := parseArgs(message.CommandArguments())
+	if len(p.positional) < 3 {
+		b.send(message.Chat.ID, "Usage: /revoke &lt;user_id&gt; &lt;verb&gt; &lt;resource&gt; -n ns")
+		return
+	}
+	targetUserID, err := strconv.ParseInt(p.positional[0], 10, 64)
 	if err != nil {
-		b.sendMessage(message.Chat.ID, "❌ Invalid user ID")
+		b.send(message.Chat.ID, "❌ Invalid user ID.")
+		return
+	}
+	verb, resource := p.positional[1], p.positional[2]
+	if p.namespace == "" {
+		b.send(message.Chat.ID, "❌ Namespace is required (-n &lt;namespace&gt;).")
 		return
 	}
 
-	verb := args[1]
-	resource := args[2]
-	namespace := ""
-
-	// Parse namespace flag
-	for i := 3; i < len(args); i++ {
-		if args[i] == "-n" && i+1 < len(args) {
-			namespace = args[i+1]
-			break
-		}
-	}
-
-	if namespace == "" {
-		b.sendMessage(message.Chat.ID, "❌ Namespace is required (-n <namespace>)")
+	if err := b.rbac.RevokePermission(ctx, targetUserID, p.namespace, resource, verb); err != nil {
+		b.fail(message.Chat.ID, "Revoke permission", err)
 		return
 	}
+	b.send(message.Chat.ID, "✅ Revoked "+code(verb+" "+resource)+" in "+code(p.namespace)+" from user "+code(p.positional[0]))
+}
 
-	// Revoke permission
-	err = b.rbac.RevokePermission(ctx, targetUserID, namespace, resource, verb)
+// handleRole handles the /role command (admin only)
+func (b *Bot) handleRole(ctx context.Context, message *tgbotapi.Message) {
+	if !b.isAdmin(ctx, message.From.ID) {
+		b.send(message.Chat.ID, "❌ Admin access required.")
+		return
+	}
+	p := parseArgs(message.CommandArguments())
+	if len(p.positional) < 2 {
+		b.send(message.Chat.ID, "Usage: /role &lt;user_id&gt; &lt;admin|operator|viewer&gt;")
+		return
+	}
+	targetUserID, err := strconv.ParseInt(p.positional[0], 10, 64)
 	if err != nil {
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ Error: %v", err))
+		b.send(message.Chat.ID, "❌ Invalid user ID.")
 		return
 	}
+	role := strings.ToLower(p.positional[1])
 
-	b.sendMessage(message.Chat.ID, fmt.Sprintf("✅ Permission revoked from user `%d`", targetUserID))
+	if err := b.rbac.SetRole(ctx, targetUserID, role); err != nil {
+		b.fail(message.Chat.ID, "Set role", err)
+		return
+	}
+	b.send(message.Chat.ID, "✅ Set role of user "+code(p.positional[0])+" to "+code(role))
 }
 
 // handlePermissions handles the /permissions command
 func (b *Bot) handlePermissions(ctx context.Context, message *tgbotapi.Message) {
 	userID := message.From.ID
-	args := strings.Fields(message.CommandArguments())
+	p := parseArgs(message.CommandArguments())
 
 	targetUserID := userID
-	if len(args) > 0 {
-		// Admin can check other users' permissions
-		if !b.rbac.IsBootstrapAdmin(userID) {
-			permission, err := b.rbac.GetUserPermission(ctx, userID)
-			if err != nil || permission.Spec.Role != "admin" {
-				b.sendMessage(message.Chat.ID, "❌ Admin access required to view other users' permissions")
-				return
-			}
+	if len(p.positional) > 0 {
+		if !b.isAdmin(ctx, userID) {
+			b.send(message.Chat.ID, "❌ Admin access required to view other users' permissions.")
+			return
 		}
-
 		var err error
-		targetUserID, err = strconv.ParseInt(args[0], 10, 64)
+		targetUserID, err = strconv.ParseInt(p.positional[0], 10, 64)
 		if err != nil {
-			b.sendMessage(message.Chat.ID, "❌ Invalid user ID")
+			b.send(message.Chat.ID, "❌ Invalid user ID.")
 			return
 		}
 	}
 
 	summary, err := b.rbac.GetPermissionSummary(ctx, targetUserID)
 	if err != nil {
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ Error: %v", err))
+		b.send(message.Chat.ID, "No permissions found for that user.")
+		return
+	}
+	b.send(message.Chat.ID, "<b>Permissions</b>\n"+pre(summary))
+}
+
+// handleUsers handles the /users command (admin only)
+func (b *Bot) handleUsers(ctx context.Context, message *tgbotapi.Message) {
+	if !b.isAdmin(ctx, message.From.ID) {
+		b.send(message.Chat.ID, "❌ Admin access required.")
+		return
+	}
+	perms, err := b.rbac.ListUserPermissions(ctx)
+	if err != nil {
+		b.fail(message.Chat.ID, "List users", err)
+		return
+	}
+	if len(perms) == 0 {
+		b.send(message.Chat.ID, "No users have permissions yet.")
 		return
 	}
 
-	b.sendMessage(message.Chat.ID, fmt.Sprintf("*Permissions Summary:*\n\n```\n%s\n```", summary))
+	sort.Slice(perms, func(i, j int) bool {
+		return perms[i].Spec.TelegramUserID < perms[j].Spec.TelegramUserID
+	})
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("<b>Users with permissions</b> (%d)\n\n", len(perms)))
+	for i := range perms {
+		s := perms[i].Spec
+		sb.WriteString(fmt.Sprintf("👤 %s — role %s — %d rule(s)\n",
+			code(strconv.FormatInt(s.TelegramUserID, 10)), htmlEscape(s.Role), len(s.Permissions)))
+	}
+	b.send(message.Chat.ID, sb.String())
 }
 
 // handleSelfUpdate handles the /selfupdate command (admin only)
 func (b *Bot) handleSelfUpdate(ctx context.Context, message *tgbotapi.Message) {
-	userID := message.From.ID
-
-	// Check if user is admin
-	if !b.rbac.IsBootstrapAdmin(userID) {
-		permission, err := b.rbac.GetUserPermission(ctx, userID)
-		if err != nil || permission.Spec.Role != "admin" {
-			b.sendMessage(message.Chat.ID, "❌ Admin access required")
-			return
-		}
-	}
-
-	namespace := b.config.BotNamespace
-	deploymentName := b.config.BotDeploymentName
-
-	b.sendMessage(message.Chat.ID, fmt.Sprintf("🔄 Initiating self-update...\n\n"+
-		"Namespace: `%s`\n"+
-		"Deployment: `%s`\n\n"+
-		"Restarting to pull latest image...", namespace, deploymentName))
-
-	// Restart the bot's own deployment
-	err := b.k8sClient.RestartDeployment(ctx, namespace, deploymentName)
-	if err != nil {
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ Error: %v", err))
+	if !b.isAdmin(ctx, message.From.ID) {
+		b.send(message.Chat.ID, "❌ Admin access required.")
 		return
 	}
+	summary := fmt.Sprintf("Restart the bot deployment %s in %s to pull the latest image?",
+		code(b.config.BotDeploymentName), code(b.config.BotNamespace))
+	b.requestConfirmation(message.Chat.ID, message.From.ID, &pendingAction{
+		kind: actionSelfUpdate, namespace: b.config.BotNamespace, name: b.config.BotDeploymentName,
+	}, summary)
+}
 
-	b.sendMessage(message.Chat.ID, "✅ Self-update triggered! The bot will restart shortly and pull the latest image from the registry.")
+// firstOr returns the first positional argument, or fallback if none.
+func firstOr(positional []string, fallback string) string {
+	if len(positional) > 0 {
+		return positional[0]
+	}
+	return fallback
 }

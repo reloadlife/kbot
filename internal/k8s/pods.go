@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"io"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,36 +38,45 @@ func (c *Client) GetPod(ctx context.Context, namespace, name string) (*corev1.Po
 	return c.clientset.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
 }
 
-// GetPodLogs retrieves logs from a pod
-func (c *Client) GetPodLogs(ctx context.Context, namespace, podName string, tailLines int64) (string, error) {
+// LogOptions controls how pod logs are fetched.
+type LogOptions struct {
+	Container    string // empty = default/first container
+	TailLines    int64  // number of trailing lines
+	Previous     bool   // logs from the previous container instance
+	SinceSeconds int64  // 0 = no time bound
+}
+
+// GetPodLogs retrieves logs from a pod using the supplied options.
+func (c *Client) GetPodLogs(ctx context.Context, namespace, podName string, lo LogOptions) (string, error) {
 	if namespace == "" {
 		namespace = corev1.NamespaceDefault
 	}
 
 	opts := &corev1.PodLogOptions{
-		TailLines: &tailLines,
+		Container: lo.Container,
+		Previous:  lo.Previous,
+	}
+	if lo.TailLines > 0 {
+		opts.TailLines = &lo.TailLines
+	}
+	if lo.SinceSeconds > 0 {
+		opts.SinceSeconds = &lo.SinceSeconds
 	}
 
 	req := c.clientset.CoreV1().Pods(namespace).GetLogs(podName, opts)
-	logs, err := req.Stream(ctx)
+	stream, err := req.Stream(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get logs: %w", err)
 	}
-	defer logs.Close()
+	defer stream.Close()
 
-	buf := make([]byte, 4096)
-	var result string
-	for {
-		n, err := logs.Read(buf)
-		if n > 0 {
-			result += string(buf[:n])
-		}
-		if err != nil {
-			break
-		}
+	data, err := io.ReadAll(stream)
+	if err != nil {
+		// Return whatever we managed to read alongside the error so the caller
+		// can decide; never silently drop a non-EOF failure.
+		return string(data), fmt.Errorf("failed reading log stream: %w", err)
 	}
-
-	return result, nil
+	return string(data), nil
 }
 
 // PodMatchesSelector checks if a pod matches the given label selector

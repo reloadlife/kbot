@@ -15,9 +15,15 @@ import (
 )
 
 type Client struct {
-	clientset     *kubernetes.Clientset
+	clientset     kubernetes.Interface
 	dynamicClient dynamic.Interface
 	config        *rest.Config
+}
+
+// NewClientWithInterfaces builds a Client from pre-constructed interfaces.
+// Intended for tests that inject fakes.
+func NewClientWithInterfaces(clientset kubernetes.Interface, dynamicClient dynamic.Interface) *Client {
+	return &Client{clientset: clientset, dynamicClient: dynamicClient}
 }
 
 // NewClient creates a new Kubernetes client
@@ -56,7 +62,7 @@ func NewClient() (*Client, error) {
 }
 
 // GetClientset returns the Kubernetes clientset
-func (c *Client) GetClientset() *kubernetes.Clientset {
+func (c *Client) GetClientset() kubernetes.Interface {
 	return c.clientset
 }
 

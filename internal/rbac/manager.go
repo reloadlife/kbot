@@ -8,10 +8,15 @@ import (
 	"kubectl-bot/internal/config"
 	"kubectl-bot/internal/k8s"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/util/retry"
 )
+
+// validRoles is the set of roles a user may be assigned.
+var validRoles = map[string]bool{"admin": true, "operator": true, "viewer": true}
 
 type Manager struct {
 	k8sClient *k8s.Client
@@ -80,99 +85,106 @@ func (m *Manager) UpdateUserPermission(ctx context.Context, permission *Telegram
 	return err
 }
 
-// GrantPermission grants a specific permission to a user
-func (m *Manager) GrantPermission(ctx context.Context, userID int64, namespace, resource, verb, selector string) error {
-	// Get existing permission or create new one
-	permission, err := m.GetUserPermission(ctx, userID)
-	if err != nil {
-		// Create new permission with viewer role
-		permission = &TelegramBotPermission{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: "kbot.go.mamad.dev/v1",
-				Kind:       "TelegramBotPermission",
-			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name: fmt.Sprintf("user-%d", userID),
-			},
-			Spec: TelegramBotPermissionSpec{
-				TelegramUserID: userID,
-				Role:           "viewer",
-				Permissions:    []Permission{},
-			},
-		}
+// newUserPermission builds an empty viewer permission object for a user.
+func newUserPermission(userID int64) *TelegramBotPermission {
+	return &TelegramBotPermission{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "kbot.go.mamad.dev/v1",
+			Kind:       "TelegramBotPermission",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: formatUserResourceName(userID),
+		},
+		Spec: TelegramBotPermissionSpec{
+			TelegramUserID: userID,
+			Role:           "viewer",
+			Permissions:    []Permission{},
+		},
 	}
-
-	// Add new permission
-	newPerm := Permission{
-		Namespace: namespace,
-		Resources: []string{resource},
-		Verbs:     []string{verb},
-		Selector:  selector,
-	}
-
-	// Check if similar permission exists and merge
-	merged := false
-	for i, p := range permission.Spec.Permissions {
-		if p.Namespace == namespace && p.Selector == selector {
-			// Merge resources and verbs
-			permission.Spec.Permissions[i].Resources = mergeUnique(p.Resources, newPerm.Resources)
-			permission.Spec.Permissions[i].Verbs = mergeUnique(p.Verbs, newPerm.Verbs)
-			merged = true
-			break
-		}
-	}
-
-	if !merged {
-		permission.Spec.Permissions = append(permission.Spec.Permissions, newPerm)
-	}
-
-	// Update or create
-	if permission.ObjectMeta.ResourceVersion == "" {
-		return m.CreateUserPermission(ctx, permission)
-	}
-	return m.UpdateUserPermission(ctx, permission)
 }
 
-// RevokePermission revokes a specific permission from a user
+// mutateUserPermission performs a read-modify-write of a user's permission CR,
+// retrying on optimistic-concurrency conflicts. The mutate callback receives
+// the current object (a fresh empty one if none exists) and returns nothing;
+// the object is then created or updated as appropriate.
+func (m *Manager) mutateUserPermission(ctx context.Context, userID int64, mutate func(p *TelegramBotPermission)) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		permission, err := m.GetUserPermission(ctx, userID)
+		create := false
+		if err != nil {
+			if !apierrors.IsNotFound(err) {
+				return err
+			}
+			permission = newUserPermission(userID)
+			create = true
+		}
+
+		mutate(permission)
+
+		if create {
+			return m.CreateUserPermission(ctx, permission)
+		}
+		return m.UpdateUserPermission(ctx, permission)
+	})
+}
+
+// GrantPermission grants a specific (verb, resource) capability to a user,
+// merging into an existing bundle keyed by (namespace, selector).
+func (m *Manager) GrantPermission(ctx context.Context, userID int64, namespace, resource, verb, selector string) error {
+	return m.mutateUserPermission(ctx, userID, func(permission *TelegramBotPermission) {
+		for i, p := range permission.Spec.Permissions {
+			if p.Namespace == namespace && p.Selector == selector {
+				permission.Spec.Permissions[i].Resources = mergeUnique(p.Resources, []string{resource})
+				permission.Spec.Permissions[i].Verbs = mergeUnique(p.Verbs, []string{verb})
+				return
+			}
+		}
+		permission.Spec.Permissions = append(permission.Spec.Permissions, Permission{
+			Namespace: namespace,
+			Resources: []string{resource},
+			Verbs:     []string{verb},
+			Selector:  selector,
+		})
+	})
+}
+
+// RevokePermission removes a single (verb, resource) capability in a namespace,
+// correctly splitting any cross-product bundle it appears in.
 func (m *Manager) RevokePermission(ctx context.Context, userID int64, namespace, resource, verb string) error {
-	permission, err := m.GetUserPermission(ctx, userID)
+	return m.mutateUserPermission(ctx, userID, func(permission *TelegramBotPermission) {
+		permission.Spec.Permissions = removeCapability(permission.Spec.Permissions, namespace, resource, verb)
+	})
+}
+
+// SetRole sets a user's role, creating the permission object if needed.
+func (m *Manager) SetRole(ctx context.Context, userID int64, role string) error {
+	if !validRoles[role] {
+		return fmt.Errorf("invalid role %q (must be admin, operator, or viewer)", role)
+	}
+	return m.mutateUserPermission(ctx, userID, func(permission *TelegramBotPermission) {
+		permission.Spec.Role = role
+		permission.Spec.TelegramUserID = userID
+	})
+}
+
+// ListUserPermissions returns all TelegramBotPermission objects in the cluster.
+func (m *Manager) ListUserPermissions(ctx context.Context) ([]TelegramBotPermission, error) {
+	list, err := m.k8sClient.GetDynamicClient().
+		Resource(k8s.TelegramBotPermissionGVR()).
+		List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// Remove matching permissions
-	newPermissions := []Permission{}
-	for _, p := range permission.Spec.Permissions {
-		if p.Namespace != namespace {
-			newPermissions = append(newPermissions, p)
+	out := make([]TelegramBotPermission, 0, len(list.Items))
+	for i := range list.Items {
+		var perm TelegramBotPermission
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(list.Items[i].Object, &perm); err != nil {
 			continue
 		}
-
-		// Filter out the resource and verb
-		newResources := []string{}
-		for _, r := range p.Resources {
-			if r != resource {
-				newResources = append(newResources, r)
-			}
-		}
-
-		newVerbs := []string{}
-		for _, v := range p.Verbs {
-			if v != verb {
-				newVerbs = append(newVerbs, v)
-			}
-		}
-
-		// Keep permission if it still has resources or verbs
-		if len(newResources) > 0 || len(newVerbs) > 0 {
-			p.Resources = newResources
-			p.Verbs = newVerbs
-			newPermissions = append(newPermissions, p)
-		}
+		out = append(out, perm)
 	}
-
-	permission.Spec.Permissions = newPermissions
-	return m.UpdateUserPermission(ctx, permission)
+	return out, nil
 }
 
 // GetPermissionSummary returns a formatted summary of user permissions

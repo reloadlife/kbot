@@ -21,8 +21,23 @@ rules:
     resources: ["services"]
     verbs: ["get", "list", "watch"]
 
+  # Events: read for /events, create for audit logging
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create"]
+
   # K8s resources - deployments
   - apiGroups: ["apps"]
     resources: ["deployments", "deployments/scale"]
     verbs: ["get", "list", "watch", "patch", "update"]
+
+  # ReplicaSets: needed to resolve previous revision on /rollback
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+
+  # Metrics for /top (optional; requires metrics-server)
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
 {{- end }}

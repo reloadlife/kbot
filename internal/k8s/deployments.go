@@ -3,6 +3,8 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -58,47 +60,72 @@ func (c *Client) RestartDeployment(ctx context.Context, namespace, name string) 
 	return err
 }
 
-// RollbackDeployment rolls back a deployment to the previous revision
+const revisionAnnotation = "deployment.kubernetes.io/revision"
+
+// rsRevision returns the integer revision of a ReplicaSet, or -1 if unset.
+func rsRevision(rs *appsv1.ReplicaSet) int64 {
+	v, ok := rs.Annotations[revisionAnnotation]
+	if !ok {
+		return -1
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return -1
+	}
+	return n
+}
+
+// RollbackDeployment rolls a deployment back to its previous revision by
+// restoring the pod template from the ReplicaSet with the second-highest
+// revision number among the ReplicaSets this deployment owns.
 func (c *Client) RollbackDeployment(ctx context.Context, namespace, name string) error {
 	if namespace == "" {
 		namespace = corev1.NamespaceDefault
 	}
 
-	// Get current deployment
 	deployment, err := c.GetDeployment(ctx, namespace, name)
 	if err != nil {
 		return err
 	}
 
-	// Get replica sets
+	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	if err != nil {
+		return fmt.Errorf("invalid deployment selector: %w", err)
+	}
+
 	rsList, err := c.clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labels.Set(deployment.Spec.Selector.MatchLabels).String(),
+		LabelSelector: selector.String(),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to list replica sets: %w", err)
 	}
 
-	if len(rsList.Items) < 2 {
-		return fmt.Errorf("no previous revision found")
-	}
-
-	// Find previous revision (second most recent)
-	var previousRS *appsv1.ReplicaSet
+	// Keep only ReplicaSets actually owned by this deployment.
+	owned := make([]*appsv1.ReplicaSet, 0, len(rsList.Items))
 	for i := range rsList.Items {
 		rs := &rsList.Items[i]
-		if rs.Name != deployment.Name && rs.Annotations["deployment.kubernetes.io/revision"] != "" {
-			if previousRS == nil || rs.CreationTimestamp.After(previousRS.CreationTimestamp.Time) {
-				previousRS = rs
-			}
+		if metav1.IsControlledBy(rs, deployment) {
+			owned = append(owned, rs)
 		}
 	}
 
-	if previousRS == nil {
-		return fmt.Errorf("no previous revision found")
+	// Highest revision first.
+	sort.Slice(owned, func(i, j int) bool {
+		return rsRevision(owned[i]) > rsRevision(owned[j])
+	})
+
+	if len(owned) < 2 {
+		return fmt.Errorf("no previous revision to roll back to")
 	}
 
-	// Update deployment to use previous template
-	deployment.Spec.Template = previousRS.Spec.Template
+	previousRS := owned[1]
+
+	// Restore the previous template, dropping the controller-managed
+	// pod-template-hash label so the deployment controller recomputes it.
+	template := *previousRS.Spec.Template.DeepCopy()
+	delete(template.Labels, "pod-template-hash")
+	deployment.Spec.Template = template
+
 	_, err = c.clientset.AppsV1().Deployments(namespace).Update(ctx, deployment, metav1.UpdateOptions{})
 	return err
 }

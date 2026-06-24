@@ -74,17 +74,27 @@ kubectl apply -f manifests/deployment.yaml
 ## Bot Commands Reference
 
 ### User Commands (RBAC-enforced)
-- `/pods [namespace]` - List pods
-- `/deployments [namespace]` - List deployments
-- `/logs <pod> [-n <ns>] [-l <selector>]` - Get pod logs
-- `/restart <deployment> [-n <ns>]` - Rollout restart
-- `/rollback <deployment> [-n <ns>]` - Rollout undo
-- `/scale <deployment> <replicas> [-n <ns>]` - Scale deployment
+- `/pods [namespace] [-l <selector>]` - List pods (ready/restarts/age)
+- `/deployments [namespace] [-l <selector>]` - List deployments
+- `/services [namespace]` - List services
+- `/describe <pod|deployment> <name> [-n <ns>]` - Show resource details
+- `/events [namespace]` - Recent namespace events
+- `/top [namespace]` - Pod CPU/memory (requires metrics-server)
+- `/logs <pod> [-n <ns>] [-c <container>] [--tail N] [--previous] [--since <secs>]` - Get pod logs (short logs inline; long logs uploaded as a `.log` file, never truncated)
+- `/restart <deployment> [-n <ns>]` - Rollout restart (confirmation prompt)
+- `/rollback <deployment> [-n <ns>]` - Rollout undo (confirmation prompt)
+- `/scale <deployment> <replicas> [-n <ns>]` - Scale deployment (confirmation prompt; capped at 100)
+
+Destructive operations (restart/rollback/scale/selfupdate) send an inline
+Confirm/Cancel keyboard. Only the requesting user can confirm, permission is
+re-checked at execution time, and the action is recorded as a K8s Event.
 
 ### Admin Commands (admin role only)
 - `/grant <user_id> <verb> <resource> [-n <ns>] [-l <selector>]` - Grant permission
-- `/revoke <user_id> <verb> <resource> [-n <ns>]` - Revoke permission
+- `/revoke <user_id> <verb> <resource> -n <ns>` - Revoke a single capability
+- `/role <user_id> <admin|operator|viewer>` - Set a user's role
 - `/permissions [user_id]` - Show user permissions
+- `/users` - List all users with permissions
 
 ## Permission Validation Implementation
 
@@ -99,8 +109,13 @@ type PermissionCheck struct {
     Selector       string  // Optional label selector
 }
 
-func (m *Manager) CheckPermission(check PermissionCheck) (bool, error)
+func (v *Validator) CheckPermission(ctx context.Context, check PermissionCheck) (Decision, error)
 ```
+
+`Decision.EffectiveSelector` carries the permission's selector back to the
+caller; list/get handlers MUST apply it to the query so selector-restricted
+users only ever see matching resources (otherwise the restriction is bypassed
+on list operations).
 
 The validator:
 1. Fetches the user's `TelegramBotPermission` CR by Telegram user ID

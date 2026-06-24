@@ -32,59 +32,64 @@ func NewValidator(manager *Manager, k8sClient *k8s.Client) *Validator {
 	}
 }
 
-// CheckPermission validates if a user has permission to perform an action
-func (v *Validator) CheckPermission(ctx context.Context, check PermissionCheck) (bool, string, error) {
-	// Bootstrap admins have all permissions
+// Decision is the result of a permission check. EffectiveSelector, when
+// non-empty, MUST be applied to list/get queries so that selector-restricted
+// users only ever see resources they are entitled to.
+type Decision struct {
+	Allowed           bool
+	EffectiveSelector string
+	Reason            string
+}
+
+// CheckPermission validates if a user has permission to perform an action and,
+// for list operations, returns the label selector that must be applied.
+func (v *Validator) CheckPermission(ctx context.Context, check PermissionCheck) (Decision, error) {
+	// Bootstrap admins have all permissions, unrestricted.
 	if v.manager.IsBootstrapAdmin(check.TelegramUserID) {
-		return true, "", nil
+		return Decision{Allowed: true}, nil
 	}
 
 	// Get user's permissions from CRD
 	permission, err := v.manager.GetUserPermission(ctx, check.TelegramUserID)
 	if err != nil {
-		return false, fmt.Sprintf("No permissions found for user %d", check.TelegramUserID), err
+		return Decision{Reason: "No permissions found. Ask an admin to grant you access."}, err
 	}
 
-	// Admin role has all permissions
+	// Admin role has all permissions, unrestricted.
 	if permission.Spec.Role == "admin" {
-		return true, "", nil
+		return Decision{Allowed: true}, nil
 	}
 
 	// Check each permission entry
 	for _, perm := range permission.Spec.Permissions {
-		// Check namespace (exact match or wildcard)
 		if !matchesNamespace(perm.Namespace, check.Namespace) {
 			continue
 		}
-
-		// Check resource
 		if !contains(perm.Resources, check.Resource) {
 			continue
 		}
-
-		// Check verb
 		if !contains(perm.Verbs, check.Verb) {
 			continue
 		}
 
-		// If permission has a selector, validate the resource matches it
+		// For an operation on a specific named resource, verify that resource
+		// actually matches the permission's selector (prevents escalation).
 		if perm.Selector != "" && check.ResourceName != "" {
 			matches, err := v.validateSelector(ctx, check.Namespace, check.Resource, check.ResourceName, perm.Selector)
 			if err != nil {
-				return false, fmt.Sprintf("Failed to validate selector: %v", err), err
+				return Decision{Reason: "Failed to validate label selector"}, err
 			}
 			if !matches {
-				return false, fmt.Sprintf("Resource '%s' does not match required selector: %s", check.ResourceName, perm.Selector), nil
+				return Decision{Reason: fmt.Sprintf("Resource %q does not match required selector %q", check.ResourceName, perm.Selector)}, nil
 			}
 		}
 
-		// Permission granted
-		return true, "", nil
+		// Granted. Hand back the selector so list/get queries get scoped.
+		return Decision{Allowed: true, EffectiveSelector: perm.Selector}, nil
 	}
 
-	// No matching permission found
-	return false, fmt.Sprintf("Permission denied: missing '%s' access to %s in namespace '%s'",
-		check.Verb, check.Resource, check.Namespace), nil
+	return Decision{Reason: fmt.Sprintf("Permission denied: missing '%s' access to %s in namespace '%s'",
+		check.Verb, check.Resource, check.Namespace)}, nil
 }
 
 // validateSelector checks if a resource matches the permission's label selector
