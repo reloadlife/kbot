@@ -579,6 +579,8 @@ func (b *Bot) handleGrant(ctx context.Context, message *tgbotapi.Message) {
 		b.fail(message.Chat.ID, "Grant permission", err)
 		return
 	}
+	b.auditPermissionChange(ctx, message.From.ID, targetUserID, "PermissionGranted",
+		fmt.Sprintf("granted %s %s in %s", verb, resource, namespace))
 
 	resp := fmt.Sprintf("✅ Granted to user %s\n\nNamespace: %s\nResource: %s\nVerb: %s",
 		code(p.positional[0]), code(namespace), code(resource), code(verb))
@@ -614,10 +616,15 @@ func (b *Bot) handleRevoke(ctx context.Context, message *tgbotapi.Message) {
 		b.fail(message.Chat.ID, "Revoke permission", err)
 		return
 	}
+	b.auditPermissionChange(ctx, message.From.ID, targetUserID, "PermissionRevoked",
+		fmt.Sprintf("revoked %s %s in %s", verb, resource, p.namespace))
 	b.send(message.Chat.ID, "✅ Revoked "+code(verb+" "+resource)+" in "+code(p.namespace)+" from user "+code(p.positional[0]))
 }
 
-// handleRole handles the /role command (admin only)
+// handleRole sets or removes a user's role binding (admin only).
+//
+//	/role <user_id> <admin|operator|viewer> [-n ns] [-l selector]
+//	/role <user_id> none [-n ns]
 func (b *Bot) handleRole(ctx context.Context, message *tgbotapi.Message) {
 	if !b.isAdmin(ctx, message.From.ID) {
 		b.send(message.Chat.ID, "❌ Admin access required.")
@@ -625,7 +632,7 @@ func (b *Bot) handleRole(ctx context.Context, message *tgbotapi.Message) {
 	}
 	p := parseArgs(message.CommandArguments())
 	if len(p.positional) < 2 {
-		b.send(message.Chat.ID, "Usage: /role &lt;user_id&gt; &lt;admin|operator|viewer&gt;")
+		b.send(message.Chat.ID, "Usage: /role &lt;user_id&gt; &lt;admin|operator|viewer|none&gt; [-n ns] [-l selector]")
 		return
 	}
 	targetUserID, err := strconv.ParseInt(p.positional[0], 10, 64)
@@ -634,12 +641,33 @@ func (b *Bot) handleRole(ctx context.Context, message *tgbotapi.Message) {
 		return
 	}
 	role := strings.ToLower(p.positional[1])
+	nsLabel := p.namespace
+	if nsLabel == "" {
+		nsLabel = "*"
+	}
 
-	if err := b.rbac.SetRole(ctx, targetUserID, role); err != nil {
+	if role == "none" {
+		if err := b.rbac.RemoveRoleBinding(ctx, targetUserID, p.namespace); err != nil {
+			b.fail(message.Chat.ID, "Remove role", err)
+			return
+		}
+		b.auditPermissionChange(ctx, message.From.ID, targetUserID, "PermissionRevoked",
+			fmt.Sprintf("removed role in %s", nsLabel))
+		b.send(message.Chat.ID, "✅ Removed role of user "+code(p.positional[0])+" in "+code(nsLabel))
+		return
+	}
+
+	if err := b.rbac.SetRoleBinding(ctx, targetUserID, role, p.namespace, p.selector); err != nil {
 		b.fail(message.Chat.ID, "Set role", err)
 		return
 	}
-	b.send(message.Chat.ID, "✅ Set role of user "+code(p.positional[0])+" to "+code(role))
+	b.auditPermissionChange(ctx, message.From.ID, targetUserID, "PermissionGranted",
+		fmt.Sprintf("set %s in %s", role, nsLabel))
+	resp := "✅ Set user " + code(p.positional[0]) + " to " + code(role) + " in " + code(nsLabel)
+	if p.selector != "" {
+		resp += " (" + code(p.selector) + ")"
+	}
+	b.send(message.Chat.ID, resp)
 }
 
 // handlePermissions handles the /permissions command
