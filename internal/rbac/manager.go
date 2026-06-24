@@ -85,7 +85,8 @@ func (m *Manager) UpdateUserPermission(ctx context.Context, permission *Telegram
 	return err
 }
 
-// newUserPermission builds an empty viewer permission object for a user.
+// newUserPermission builds an empty permission object for a user. No role or
+// bindings are set, so a freshly-created user has zero access until granted.
 func newUserPermission(userID int64) *TelegramBotPermission {
 	return &TelegramBotPermission{
 		TypeMeta: metav1.TypeMeta{
@@ -97,7 +98,7 @@ func newUserPermission(userID int64) *TelegramBotPermission {
 		},
 		Spec: TelegramBotPermissionSpec{
 			TelegramUserID: userID,
-			Role:           "viewer",
+			RoleBindings:   []RoleBinding{},
 			Permissions:    []Permission{},
 		},
 	}
@@ -167,6 +168,46 @@ func (m *Manager) SetRole(ctx context.Context, userID int64, role string) error 
 	})
 }
 
+// SetRoleBinding upserts a role binding for a namespace ("*" for all).
+func (m *Manager) SetRoleBinding(ctx context.Context, userID int64, role, namespace, selector string) error {
+	if !roleBindingRoles[role] {
+		return fmt.Errorf("invalid role %q (must be admin, operator, or viewer)", role)
+	}
+	if namespace == "" {
+		namespace = "*"
+	}
+	return m.mutateUserPermission(ctx, userID, func(p *TelegramBotPermission) {
+		p.Spec.TelegramUserID = userID
+		p.Spec.RoleBindings = upsertRoleBinding(p.Spec.RoleBindings, RoleBinding{
+			Role: role, Namespace: namespace, Selector: selector,
+		})
+	})
+}
+
+// RemoveRoleBinding removes any role binding for a namespace ("*" for the
+// cluster-wide binding).
+func (m *Manager) RemoveRoleBinding(ctx context.Context, userID int64, namespace string) error {
+	if namespace == "" {
+		namespace = "*"
+	}
+	return m.mutateUserPermission(ctx, userID, func(p *TelegramBotPermission) {
+		p.Spec.RoleBindings = removeRoleBinding(p.Spec.RoleBindings, namespace)
+	})
+}
+
+// EffectiveRoleBindings returns the user's role bindings including any legacy
+// role. Bootstrap admins report a synthetic cluster-wide admin binding.
+func (m *Manager) EffectiveRoleBindings(ctx context.Context, userID int64) ([]RoleBinding, error) {
+	if m.IsBootstrapAdmin(userID) {
+		return []RoleBinding{{Role: "admin", Namespace: "*"}}, nil
+	}
+	permission, err := m.GetUserPermission(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return effectiveRoleBindings(permission.Spec), nil
+}
+
 // ListUserPermissions returns all TelegramBotPermission objects in the cluster.
 func (m *Manager) ListUserPermissions(ctx context.Context) ([]TelegramBotPermission, error) {
 	list, err := m.k8sClient.GetDynamicClient().
@@ -187,32 +228,47 @@ func (m *Manager) ListUserPermissions(ctx context.Context) ([]TelegramBotPermiss
 	return out, nil
 }
 
-// GetPermissionSummary returns a formatted summary of user permissions
+// GetPermissionSummary returns a formatted summary of user permissions.
 func (m *Manager) GetPermissionSummary(ctx context.Context, userID int64) (string, error) {
 	permission, err := m.GetUserPermission(ctx, userID)
 	if err != nil {
 		return "", err
 	}
+	return formatPermissionSummary(permission.Spec), nil
+}
 
-	summary := fmt.Sprintf("User ID: %d\nRole: %s\n\n", permission.Spec.TelegramUserID, permission.Spec.Role)
+// formatPermissionSummary renders bindings and fine-grained permissions as text.
+func formatPermissionSummary(spec TelegramBotPermissionSpec) string {
+	summary := fmt.Sprintf("User ID: %d\n", spec.TelegramUserID)
 
-	if len(permission.Spec.Permissions) == 0 {
-		summary += "No permissions granted"
-		return summary, nil
+	bindings := effectiveRoleBindings(spec)
+	if len(bindings) == 0 && len(spec.Permissions) == 0 {
+		return summary + "\nNo permissions granted"
 	}
 
-	summary += "Permissions:\n"
-	for i, p := range permission.Spec.Permissions {
-		summary += fmt.Sprintf("%d. Namespace: %s\n", i+1, p.Namespace)
-		summary += fmt.Sprintf("   Resources: %v\n", p.Resources)
-		summary += fmt.Sprintf("   Verbs: %v\n", p.Verbs)
-		if p.Selector != "" {
-			summary += fmt.Sprintf("   Selector: %s\n", p.Selector)
+	if len(bindings) > 0 {
+		summary += "\nRoles:\n"
+		for _, b := range bindings {
+			line := fmt.Sprintf("  • %s in %s", b.Role, b.Namespace)
+			if b.Selector != "" {
+				line += " (" + b.Selector + ")"
+			}
+			summary += line + "\n"
 		}
-		summary += "\n"
 	}
 
-	return summary, nil
+	if len(spec.Permissions) > 0 {
+		summary += "\nFine-grained permissions:\n"
+		for i, p := range spec.Permissions {
+			summary += fmt.Sprintf("%d. Namespace: %s\n", i+1, p.Namespace)
+			summary += fmt.Sprintf("   Resources: %v\n", p.Resources)
+			summary += fmt.Sprintf("   Verbs: %v\n", p.Verbs)
+			if p.Selector != "" {
+				summary += fmt.Sprintf("   Selector: %s\n", p.Selector)
+			}
+		}
+	}
+	return summary
 }
 
 // IsBootstrapAdmin checks if user is a bootstrap admin

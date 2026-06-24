@@ -1,6 +1,7 @@
 package rbac
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -298,6 +299,32 @@ func TestDeepCopy_TelegramBotPermission(t *testing.T) {
 	copiedNil := nilPerm.DeepCopy()
 	if copiedNil != nil {
 		t.Error("DeepCopy of nil should return nil")
+	}
+}
+
+func TestFormatPermissionSummaryShowsBindings(t *testing.T) {
+	spec := TelegramBotPermissionSpec{
+		TelegramUserID: 7,
+		RoleBindings: []RoleBinding{
+			{Role: "viewer", Namespace: "prod", Selector: "app=web"},
+			{Role: "operator", Namespace: "*"},
+		},
+		Permissions: []Permission{
+			{Namespace: "staging", Resources: []string{"pods"}, Verbs: []string{"logs"}},
+		},
+	}
+	out := formatPermissionSummary(spec)
+	for _, want := range []string{"viewer", "prod", "app=web", "operator", "*", "staging", "logs"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestFormatPermissionSummaryEmpty(t *testing.T) {
+	out := formatPermissionSummary(TelegramBotPermissionSpec{TelegramUserID: 7})
+	if !strings.Contains(out, "No permissions") {
+		t.Errorf("expected empty notice, got %q", out)
 	}
 }
 
