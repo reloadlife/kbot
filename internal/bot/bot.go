@@ -214,8 +214,9 @@ func (b *Bot) hasAnyPermission(ctx context.Context, userID int64) bool {
 		return false
 	}
 
-	// User has permissions if role is set and has at least one permission entry
-	return permission.Spec.Role != "" && len(permission.Spec.Permissions) > 0
+	return permission.Spec.Role != "" ||
+		len(permission.Spec.RoleBindings) > 0 ||
+		len(permission.Spec.Permissions) > 0
 }
 
 // setupCommands sets up bot commands for Telegram UI

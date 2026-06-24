@@ -102,49 +102,73 @@ func formatAge(t time.Time) string {
 	}
 }
 
-// handleStart handles the /start command
+// handleStart / handleWhoami greets the user and shows their roles + abilities.
 func (b *Bot) handleStart(ctx context.Context, message *tgbotapi.Message) {
 	userID := message.From.ID
-	role := b.getUserRole(ctx, userID)
+	var sb strings.Builder
+	sb.WriteString("👋 <b>Kubernetes Bot</b>\n\n")
+	sb.WriteString("User ID: " + code(strconv.FormatInt(userID, 10)) + "\n")
 
-	b.send(message.Chat.ID, fmt.Sprintf("👋 Welcome to Kubernetes Bot!\n\nYour role: %s\nUser ID: %s\n\nType /help to see available commands.",
-		bold(role), code(strconv.FormatInt(userID, 10))))
+	bindings, err := b.rbac.EffectiveRoleBindings(ctx, userID)
+	if err != nil || len(bindings) == 0 {
+		sb.WriteString("\nYou have no access yet. Ask an admin to grant you a role.\n")
+		b.send(message.Chat.ID, sb.String())
+		return
+	}
+
+	sb.WriteString("\n<b>Roles:</b>\n")
+	for _, rb := range bindings {
+		line := "• " + htmlEscape(rb.Role) + " in " + code(rb.Namespace)
+		if rb.Selector != "" {
+			line += " (" + code(rb.Selector) + ")"
+		}
+		sb.WriteString(line + "\n")
+	}
+	sb.WriteString("\nType /help for the commands you can run.")
+	b.send(message.Chat.ID, sb.String())
 }
 
-// handleHelp handles the /help command
+// handleHelp shows only the command groups the caller can use.
 func (b *Bot) handleHelp(ctx context.Context, message *tgbotapi.Message) {
-	help := `<b>Available Commands</b>
+	caps := b.userCapabilities(ctx, message.From.ID)
 
-<b>Resource Queries:</b>
-/namespaces — list accessible namespaces
-/pods [namespace] [-l selector] — list pods
-/deployments [namespace] [-l selector] — list deployments
-/services [namespace] — list services
-/describe &lt;pod|deployment&gt; &lt;name&gt; [-n ns] — show details
-/events [namespace] — recent events
-/top [namespace] — pod CPU/memory usage
+	var sb strings.Builder
+	sb.WriteString("<b>Available Commands</b>\n\n")
+	sb.WriteString("<b>General:</b>\n/start, /whoami — your identity and roles\n/help — this message\n/namespaces — accessible namespaces\n/permissions — your permissions\n")
 
-<b>Operations (confirmed):</b>
-/logs &lt;pod&gt; [-n ns] [-c container] [--tail N] [--previous] [--since secs]
-/restart &lt;deployment&gt; [-n ns]
-/rollback &lt;deployment&gt; [-n ns]
-/scale &lt;deployment&gt; &lt;replicas&gt; [-n ns]
+	if caps.Read {
+		sb.WriteString("\n<b>Resource Queries:</b>\n")
+		sb.WriteString("/pods [ns] [-l selector]\n/deployments [ns] [-l selector]\n/services [ns]\n")
+		sb.WriteString("/describe &lt;pod|deployment&gt; &lt;name&gt; [-n ns]\n/events [ns]\n/top [ns]\n")
+		sb.WriteString("/logs &lt;pod&gt; [-n ns] [-c container] [--tail N] [--previous] [--since secs]\n")
+	}
+	if caps.Write {
+		sb.WriteString("\n<b>Operations (confirmed):</b>\n")
+		sb.WriteString("/restart &lt;deployment&gt; [-n ns]\n/rollback &lt;deployment&gt; [-n ns]\n/scale &lt;deployment&gt; &lt;replicas&gt; [-n ns]\n")
+	}
+	if caps.Admin {
+		sb.WriteString("\n<b>Admin Commands:</b>\n")
+		sb.WriteString("/role &lt;user_id&gt; &lt;viewer|operator|admin|none&gt; [-n ns] [-l selector]\n")
+		sb.WriteString("/grant &lt;user_id&gt; &lt;verb&gt; &lt;resource&gt; [-n ns] [-l selector]\n")
+		sb.WriteString("/revoke &lt;user_id&gt; &lt;verb&gt; &lt;resource&gt; -n ns\n")
+		sb.WriteString("/permissions [user_id]\n/users\n/selfupdate\n")
+	}
+	if !caps.Read && !caps.Write && !caps.Admin {
+		sb.WriteString("\nYou have no access yet. Ask an admin to grant you a role.")
+	}
+	b.send(message.Chat.ID, sb.String())
+}
 
-<b>Admin Commands:</b>
-/grant &lt;user_id&gt; &lt;verb&gt; &lt;resource&gt; [-n ns] [-l selector]
-/revoke &lt;user_id&gt; &lt;verb&gt; &lt;resource&gt; -n ns
-/role &lt;user_id&gt; &lt;admin|operator|viewer&gt;
-/permissions [user_id]
-/users — list all permission holders
-/selfupdate — restart the bot to pull the latest image
-
-<b>Examples:</b>
-<code>/pods production</code>
-<code>/logs frontend-abc -n production -c nginx --tail 200</code>
-<code>/scale api 3 -n staging</code>
-<code>/grant 123456789 logs pods -n production -l app=frontend</code>`
-
-	b.send(message.Chat.ID, help)
+// userCapabilities returns coarse read/write/admin flags for a user.
+func (b *Bot) userCapabilities(ctx context.Context, userID int64) rbac.Capabilities {
+	if b.rbac.IsBootstrapAdmin(userID) {
+		return rbac.Capabilities{Read: true, Write: true, Admin: true}
+	}
+	permission, err := b.rbac.GetUserPermission(ctx, userID)
+	if err != nil {
+		return rbac.Capabilities{}
+	}
+	return rbac.SummarizeCapabilities(permission.Spec)
 }
 
 // handleNamespaces handles the /namespaces command

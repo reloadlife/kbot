@@ -129,6 +129,34 @@ func collectNamespaces(spec TelegramBotPermissionSpec) (namespaces []string, wil
 	return namespaces, wildcard
 }
 
+// Capabilities is a coarse summary of what a user can do, used to tailor help.
+type Capabilities struct {
+	Read  bool
+	Write bool
+	Admin bool
+}
+
+// writeVerbs are the mutating verbs.
+var writeVerbs = map[string]bool{"restart": true, "rollback": true, "scale": true}
+
+// SummarizeCapabilities derives coarse read/write/admin flags from a spec.
+func SummarizeCapabilities(spec TelegramBotPermissionSpec) Capabilities {
+	if hasAdminBinding(spec) {
+		return Capabilities{Read: true, Write: true, Admin: true}
+	}
+	caps := Capabilities{}
+	for _, r := range effectiveRules(spec) {
+		for _, v := range r.Verbs {
+			if writeVerbs[v] {
+				caps.Write = true
+			} else {
+				caps.Read = true
+			}
+		}
+	}
+	return caps
+}
+
 // upsertRoleBinding replaces the binding for rb.Namespace, or appends it.
 func upsertRoleBinding(bindings []RoleBinding, rb RoleBinding) []RoleBinding {
 	for i := range bindings {

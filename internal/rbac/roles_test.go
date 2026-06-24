@@ -121,6 +121,27 @@ func TestCollectNamespaces(t *testing.T) {
 	}
 }
 
+func TestSummarizeCapabilities(t *testing.T) {
+	viewer := SummarizeCapabilities(TelegramBotPermissionSpec{
+		RoleBindings: []RoleBinding{{Role: "viewer", Namespace: "prod"}},
+	})
+	if !viewer.Read || viewer.Write || viewer.Admin {
+		t.Errorf("viewer caps wrong: %+v", viewer)
+	}
+	op := SummarizeCapabilities(TelegramBotPermissionSpec{
+		RoleBindings: []RoleBinding{{Role: "operator", Namespace: "*"}},
+	})
+	if !op.Read || !op.Write || op.Admin {
+		t.Errorf("operator caps wrong: %+v", op)
+	}
+	adm := SummarizeCapabilities(TelegramBotPermissionSpec{
+		RoleBindings: []RoleBinding{{Role: "admin", Namespace: "*"}},
+	})
+	if !adm.Admin {
+		t.Errorf("admin caps wrong: %+v", adm)
+	}
+}
+
 func TestUpsertAndRemoveRoleBinding(t *testing.T) {
 	bs := []RoleBinding{{Role: "viewer", Namespace: "prod"}}
 	bs = upsertRoleBinding(bs, RoleBinding{Role: "operator", Namespace: "prod"})
