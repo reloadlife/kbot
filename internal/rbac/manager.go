@@ -15,9 +15,6 @@ import (
 	"k8s.io/client-go/util/retry"
 )
 
-// validRoles is the set of roles a user may be assigned.
-var validRoles = map[string]bool{"admin": true, "operator": true, "viewer": true}
-
 type Manager struct {
 	k8sClient *k8s.Client
 	config    *config.Config
@@ -154,17 +151,6 @@ func (m *Manager) GrantPermission(ctx context.Context, userID int64, namespace, 
 func (m *Manager) RevokePermission(ctx context.Context, userID int64, namespace, resource, verb string) error {
 	return m.mutateUserPermission(ctx, userID, func(permission *TelegramBotPermission) {
 		permission.Spec.Permissions = removeCapability(permission.Spec.Permissions, namespace, resource, verb)
-	})
-}
-
-// SetRole sets a user's role, creating the permission object if needed.
-func (m *Manager) SetRole(ctx context.Context, userID int64, role string) error {
-	if !validRoles[role] {
-		return fmt.Errorf("invalid role %q (must be admin, operator, or viewer)", role)
-	}
-	return m.mutateUserPermission(ctx, userID, func(permission *TelegramBotPermission) {
-		permission.Spec.Role = role
-		permission.Spec.TelegramUserID = userID
 	})
 }
 

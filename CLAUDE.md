@@ -121,12 +121,12 @@ users only ever see matching resources (otherwise the restriction is bypassed
 on list operations).
 
 The validator:
-1. Fetches the user's `TelegramBotPermission` CR by Telegram user ID
-2. Returns true immediately if role is "admin"
-3. Iterates through the permissions array
-4. Matches namespace (exact or `*`), resource, and verb
-5. If the permission has a selector, validates the user's query selector is compatible
-6. Returns true if any permission grants access
+1. Fetches the user's `TelegramBotPermission` CR by Telegram user ID (bootstrap admins are short-circuited before the CR lookup)
+2. Computes effective rules via `effectiveRules()`: expands `roleBindings` through the role catalog + synthesizes a `*`-scoped binding from any legacy flat `role` field + appends raw fine-grained `permissions`
+3. Calls pure `decide(spec, check)` (in `internal/rbac/roles.go`): if `hasAdminBinding` is true, grants immediately
+4. Otherwise iterates effective rules, matching namespace (exact or `*`), resource, and verb
+5. If a matching rule has no selector the access is unrestricted; if all matching rules carry selectors, the first one becomes `Decision.EffectiveSelector`
+6. Returns `Decision{Allowed: true}` if any rule matched, denied with reason otherwise
 
 ## CRD Spec Structure
 
