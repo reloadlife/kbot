@@ -15,9 +15,18 @@ type TelegramBotPermission struct {
 
 // TelegramBotPermissionSpec defines the desired state of TelegramBotPermission
 type TelegramBotPermissionSpec struct {
-	TelegramUserID int64        `json:"telegramUserId"`
-	Role           string       `json:"role"`
-	Permissions    []Permission `json:"permissions,omitempty"`
+	TelegramUserID int64         `json:"telegramUserId"`
+	Role           string        `json:"role,omitempty"` // legacy; normalized into a RoleBinding on read
+	RoleBindings   []RoleBinding `json:"roleBindings,omitempty"`
+	Permissions    []Permission  `json:"permissions,omitempty"`
+}
+
+// RoleBinding grants a named role (viewer/operator/admin) within a namespace.
+// A binding expands into concrete Permission bundles via the role catalog.
+type RoleBinding struct {
+	Role      string `json:"role"`
+	Namespace string `json:"namespace"`
+	Selector  string `json:"selector,omitempty"`
 }
 
 // Permission defines granular access control
@@ -61,6 +70,10 @@ func (in *TelegramBotPermission) DeepCopyObject() runtime.Object {
 // DeepCopyInto copies spec
 func (in *TelegramBotPermissionSpec) DeepCopyInto(out *TelegramBotPermissionSpec) {
 	*out = *in
+	if in.RoleBindings != nil {
+		out.RoleBindings = make([]RoleBinding, len(in.RoleBindings))
+		copy(out.RoleBindings, in.RoleBindings)
+	}
 	if in.Permissions != nil {
 		in, out := &in.Permissions, &out.Permissions
 		*out = make([]Permission, len(*in))

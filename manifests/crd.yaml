@@ -23,7 +23,6 @@ spec:
               type: object
               required:
                 - telegramUserId
-                - role
               properties:
                 telegramUserId:
                   type: integer
@@ -33,6 +32,24 @@ spec:
                   type: string
                   enum: ["admin", "operator", "viewer"]
                   description: "User role"
+                roleBindings:
+                  type: array
+                  description: "Named role grants, optionally scoped to a namespace"
+                  items:
+                    type: object
+                    required:
+                      - role
+                      - namespace
+                    properties:
+                      role:
+                        type: string
+                        enum: ["admin", "operator", "viewer"]
+                      namespace:
+                        type: string
+                        description: "Kubernetes namespace (* for all)"
+                      selector:
+                        type: string
+                        description: "Label selector (e.g., app=frontend)"
                 permissions:
                   type: array
                   items:
