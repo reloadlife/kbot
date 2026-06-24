@@ -187,20 +187,6 @@ func (b *Bot) fail(chatID int64, action string, err error) {
 	b.send(chatID, "❌ "+htmlEscape(action)+" failed. Check the bot logs for details.")
 }
 
-// getUserRole returns the user's role for display
-func (b *Bot) getUserRole(ctx context.Context, userID int64) string {
-	if b.rbac.IsBootstrapAdmin(userID) {
-		return "admin (bootstrap)"
-	}
-
-	permission, err := b.rbac.GetUserPermission(ctx, userID)
-	if err != nil {
-		return "none"
-	}
-
-	return permission.Spec.Role
-}
-
 // hasAnyPermission checks if user has any permissions (bootstrap admin or CRD permissions)
 func (b *Bot) hasAnyPermission(ctx context.Context, userID int64) bool {
 	// Check bootstrap admin
