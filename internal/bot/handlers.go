@@ -192,9 +192,10 @@ func (b *Bot) handleNamespaces(ctx context.Context, message *tgbotapi.Message) {
 	b.send(message.Chat.ID, sb.String())
 }
 
-// resolveListAccess checks list permission for a resource and returns the
-// selector that must be applied to the query, or false if denied.
-func (b *Bot) resolveListAccess(ctx context.Context, chatID, userID int64, namespace, resource, userSelector string) (string, bool) {
+// resolveListAccess checks list permission for a resource. It returns the
+// selector to apply to the query, the permission-imposed restriction (for
+// display, empty if unrestricted), and ok=false if denied.
+func (b *Bot) resolveListAccess(ctx context.Context, chatID, userID int64, namespace, resource, userSelector string) (combined string, restriction string, ok bool) {
 	dec, err := b.validator.CheckPermission(ctx, rbac.PermissionCheck{
 		TelegramUserID: userID,
 		Namespace:      namespace,
@@ -203,9 +204,17 @@ func (b *Bot) resolveListAccess(ctx context.Context, chatID, userID int64, names
 	})
 	if err != nil || !dec.Allowed {
 		b.send(chatID, rbac.FormatPermissionDenied(dec.Reason))
-		return "", false
+		return "", "", false
 	}
-	return combineSelectors(dec.EffectiveSelector, userSelector), true
+	return combineSelectors(dec.EffectiveSelector, userSelector), dec.EffectiveSelector, true
+}
+
+// selectorFooter renders a restriction note, or "" when unrestricted.
+func selectorFooter(restriction string) string {
+	if restriction == "" {
+		return ""
+	}
+	return "\n🔒 filtered to " + code(restriction)
 }
 
 // handlePods handles the /pods command
@@ -213,7 +222,7 @@ func (b *Bot) handlePods(ctx context.Context, message *tgbotapi.Message) {
 	p := parseArgs(message.CommandArguments())
 	namespace := rbac.NormalizeNamespace(firstOr(p.positional, p.namespace))
 
-	selector, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "pods", p.selector)
+	selector, restriction, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "pods", p.selector)
 	if !ok {
 		return
 	}
@@ -236,7 +245,7 @@ func (b *Bot) handlePods(ctx context.Context, message *tgbotapi.Message) {
 		sb.WriteString(fmt.Sprintf("📦 %s\n   %s • %d/%d ready • %d restarts • %s\n\n",
 			code(pod.Name), htmlEscape(string(pod.Status.Phase)), ready, total, restarts, formatAge(pod.CreationTimestamp.Time)))
 	}
-	b.send(message.Chat.ID, sb.String())
+	b.send(message.Chat.ID, sb.String()+selectorFooter(restriction))
 }
 
 // podReadiness returns ready/total container counts and total restart count.
@@ -256,7 +265,7 @@ func (b *Bot) handleDeployments(ctx context.Context, message *tgbotapi.Message) 
 	p := parseArgs(message.CommandArguments())
 	namespace := rbac.NormalizeNamespace(firstOr(p.positional, p.namespace))
 
-	selector, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "deployments", p.selector)
+	selector, restriction, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "deployments", p.selector)
 	if !ok {
 		return
 	}
@@ -282,7 +291,7 @@ func (b *Bot) handleDeployments(ctx context.Context, message *tgbotapi.Message) 
 		sb.WriteString(fmt.Sprintf("🚀 %s\n   %d/%d ready • %s\n\n",
 			code(dep.Name), dep.Status.ReadyReplicas, desired, formatAge(dep.CreationTimestamp.Time)))
 	}
-	b.send(message.Chat.ID, sb.String())
+	b.send(message.Chat.ID, sb.String()+selectorFooter(restriction))
 }
 
 // handleServices handles the /services command
@@ -290,7 +299,7 @@ func (b *Bot) handleServices(ctx context.Context, message *tgbotapi.Message) {
 	p := parseArgs(message.CommandArguments())
 	namespace := rbac.NormalizeNamespace(firstOr(p.positional, p.namespace))
 
-	selector, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "services", p.selector)
+	selector, restriction, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "services", p.selector)
 	if !ok {
 		return
 	}
@@ -312,7 +321,7 @@ func (b *Bot) handleServices(ctx context.Context, message *tgbotapi.Message) {
 		sb.WriteString(fmt.Sprintf("🌐 %s\n   %s • %s\n\n",
 			code(svc.Name), htmlEscape(string(svc.Spec.Type)), htmlEscape(svc.Spec.ClusterIP)))
 	}
-	b.send(message.Chat.ID, sb.String())
+	b.send(message.Chat.ID, sb.String()+selectorFooter(restriction))
 }
 
 // handleLogs handles the /logs command
@@ -441,7 +450,7 @@ func (b *Bot) handleEvents(ctx context.Context, message *tgbotapi.Message) {
 	p := parseArgs(message.CommandArguments())
 	namespace := rbac.NormalizeNamespace(firstOr(p.positional, p.namespace))
 
-	if _, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "pods", ""); !ok {
+	if _, _, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "pods", ""); !ok {
 		return
 	}
 
@@ -479,7 +488,7 @@ func (b *Bot) handleTop(ctx context.Context, message *tgbotapi.Message) {
 	p := parseArgs(message.CommandArguments())
 	namespace := rbac.NormalizeNamespace(firstOr(p.positional, p.namespace))
 
-	if _, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "pods", ""); !ok {
+	if _, _, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "pods", ""); !ok {
 		return
 	}
 
