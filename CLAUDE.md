@@ -21,6 +21,8 @@ Three permission components:
 3. **verbs**: get, list, logs, restart, rollback, scale
 4. **selector** (optional): Label selector to restrict access (e.g., `app=frontend`)
 
+Roles are presets expanded by a catalog (internal/rbac/roles.go): viewer = get/list/logs, operator = viewer + restart/rollback/scale, admin = cluster-wide. A legacy flat `role` field is normalized to a `*`-scoped binding on read.
+
 Permission validation flow:
 ```
 User command → Extract (userID, namespace, resource, verb, selector)
@@ -84,6 +86,7 @@ kubectl apply -f manifests/deployment.yaml
 - `/restart <deployment> [-n <ns>]` - Rollout restart (confirmation prompt)
 - `/rollback <deployment> [-n <ns>]` - Rollout undo (confirmation prompt)
 - `/scale <deployment> <replicas> [-n <ns>]` - Scale deployment (confirmation prompt; capped at 100)
+- `/whoami` - Show your identity, roles, and what you can do
 
 Destructive operations (restart/rollback/scale/selfupdate) send an inline
 Confirm/Cancel keyboard. Only the requesting user can confirm, permission is
@@ -92,7 +95,7 @@ re-checked at execution time, and the action is recorded as a K8s Event.
 ### Admin Commands (admin role only)
 - `/grant <user_id> <verb> <resource> [-n <ns>] [-l <selector>]` - Grant permission
 - `/revoke <user_id> <verb> <resource> -n <ns>` - Revoke a single capability
-- `/role <user_id> <admin|operator|viewer>` - Set a user's role
+- `/role <user_id> <viewer|operator|admin|none> [-n <ns>] [-l <selector>]` - Set/remove a namespace-scoped role
 - `/permissions [user_id]` - Show user permissions
 - `/users` - List all users with permissions
 
@@ -118,12 +121,12 @@ users only ever see matching resources (otherwise the restriction is bypassed
 on list operations).
 
 The validator:
-1. Fetches the user's `TelegramBotPermission` CR by Telegram user ID
-2. Returns true immediately if role is "admin"
-3. Iterates through the permissions array
-4. Matches namespace (exact or `*`), resource, and verb
-5. If the permission has a selector, validates the user's query selector is compatible
-6. Returns true if any permission grants access
+1. Fetches the user's `TelegramBotPermission` CR by Telegram user ID (bootstrap admins are short-circuited before the CR lookup)
+2. Computes effective rules via `effectiveRules()`: expands `roleBindings` through the role catalog + synthesizes a `*`-scoped binding from any legacy flat `role` field + appends raw fine-grained `permissions`
+3. Calls pure `decide(spec, check)` (in `internal/rbac/roles.go`): if `hasAdminBinding` is true, grants immediately
+4. Otherwise iterates effective rules, matching namespace (exact or `*`), resource, and verb
+5. If a matching rule has no selector the access is unrestricted; if all matching rules carry selectors, the first one becomes `Decision.EffectiveSelector`
+6. Returns `Decision{Allowed: true}` if any rule matched, denied with reason otherwise
 
 ## CRD Spec Structure
 
@@ -135,6 +138,10 @@ metadata:
 spec:
   telegramUserId: <int64>
   role: admin|operator|viewer
+  roleBindings:
+    - role: viewer|operator|admin
+      namespace: string        # "*" for all
+      selector: string         # optional
   permissions:
     - namespace: string        # "*" for all
       resources: [string]      # ["pods", "deployments", "services"]

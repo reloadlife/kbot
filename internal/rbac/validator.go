@@ -55,41 +55,24 @@ func (v *Validator) CheckPermission(ctx context.Context, check PermissionCheck) 
 		return Decision{Reason: "No permissions found. Ask an admin to grant you access."}, err
 	}
 
-	// Admin role has all permissions, unrestricted.
-	if permission.Spec.Role == "admin" {
-		return Decision{Allowed: true}, nil
+	dec := decide(permission.Spec, check)
+	if !dec.Allowed {
+		return Decision{Reason: fmt.Sprintf("Permission denied: %s", dec.Reason)}, nil
 	}
 
-	// Check each permission entry
-	for _, perm := range permission.Spec.Permissions {
-		if !matchesNamespace(perm.Namespace, check.Namespace) {
-			continue
+	// For an operation on a specific named resource with a selector restriction,
+	// verify the resource actually matches (prevents privilege escalation).
+	if dec.EffectiveSelector != "" && check.ResourceName != "" {
+		matches, err := v.validateSelector(ctx, check.Namespace, check.Resource, check.ResourceName, dec.EffectiveSelector)
+		if err != nil {
+			return Decision{Reason: "Failed to validate label selector"}, err
 		}
-		if !contains(perm.Resources, check.Resource) {
-			continue
+		if !matches {
+			return Decision{Reason: fmt.Sprintf("Resource %q does not match required selector %q", check.ResourceName, dec.EffectiveSelector)}, nil
 		}
-		if !contains(perm.Verbs, check.Verb) {
-			continue
-		}
-
-		// For an operation on a specific named resource, verify that resource
-		// actually matches the permission's selector (prevents escalation).
-		if perm.Selector != "" && check.ResourceName != "" {
-			matches, err := v.validateSelector(ctx, check.Namespace, check.Resource, check.ResourceName, perm.Selector)
-			if err != nil {
-				return Decision{Reason: "Failed to validate label selector"}, err
-			}
-			if !matches {
-				return Decision{Reason: fmt.Sprintf("Resource %q does not match required selector %q", check.ResourceName, perm.Selector)}, nil
-			}
-		}
-
-		// Granted. Hand back the selector so list/get queries get scoped.
-		return Decision{Allowed: true, EffectiveSelector: perm.Selector}, nil
 	}
 
-	return Decision{Reason: fmt.Sprintf("Permission denied: missing '%s' access to %s in namespace '%s'",
-		check.Verb, check.Resource, check.Namespace)}, nil
+	return dec, nil
 }
 
 // validateSelector checks if a resource matches the permission's label selector
@@ -147,44 +130,26 @@ func (v *Validator) ValidateAndGetNamespaces(ctx context.Context, userID int64) 
 		return nil, err
 	}
 
-	// Admin role can access all namespaces
-	if permission.Spec.Role == "admin" {
+	listAll := func() ([]string, error) {
 		nsList, err := v.k8sClient.ListNamespaces(ctx)
 		if err != nil {
 			return nil, err
 		}
-
-		namespaces := []string{}
+		namespaces := make([]string, 0, len(nsList.Items))
 		for _, ns := range nsList.Items {
 			namespaces = append(namespaces, ns.Name)
 		}
 		return namespaces, nil
 	}
 
-	// Collect unique namespaces from permissions
-	nsSet := make(map[string]bool)
-	for _, perm := range permission.Spec.Permissions {
-		if perm.Namespace == "*" {
-			// Wildcard, return all namespaces
-			nsList, err := v.k8sClient.ListNamespaces(ctx)
-			if err != nil {
-				return nil, err
-			}
-
-			namespaces := []string{}
-			for _, ns := range nsList.Items {
-				namespaces = append(namespaces, ns.Name)
-			}
-			return namespaces, nil
-		}
-		nsSet[perm.Namespace] = true
+	if hasAdminBinding(permission.Spec) {
+		return listAll()
 	}
 
-	namespaces := []string{}
-	for ns := range nsSet {
-		namespaces = append(namespaces, ns)
+	namespaces, wildcard := collectNamespaces(permission.Spec)
+	if wildcard {
+		return listAll()
 	}
-
 	return namespaces, nil
 }
 

@@ -127,7 +127,7 @@ func (b *Bot) handleMessage(ctx context.Context, message *tgbotapi.Message) {
 
 	// Route commands to handlers
 	switch message.Command() {
-	case "start":
+	case "start", "whoami":
 		b.handleStart(cmdCtx, message)
 	case "help":
 		b.handleHelp(cmdCtx, message)
@@ -187,20 +187,6 @@ func (b *Bot) fail(chatID int64, action string, err error) {
 	b.send(chatID, "❌ "+htmlEscape(action)+" failed. Check the bot logs for details.")
 }
 
-// getUserRole returns the user's role for display
-func (b *Bot) getUserRole(ctx context.Context, userID int64) string {
-	if b.rbac.IsBootstrapAdmin(userID) {
-		return "admin (bootstrap)"
-	}
-
-	permission, err := b.rbac.GetUserPermission(ctx, userID)
-	if err != nil {
-		return "none"
-	}
-
-	return permission.Spec.Role
-}
-
 // hasAnyPermission checks if user has any permissions (bootstrap admin or CRD permissions)
 func (b *Bot) hasAnyPermission(ctx context.Context, userID int64) bool {
 	// Check bootstrap admin
@@ -214,14 +200,16 @@ func (b *Bot) hasAnyPermission(ctx context.Context, userID int64) bool {
 		return false
 	}
 
-	// User has permissions if role is set and has at least one permission entry
-	return permission.Spec.Role != "" && len(permission.Spec.Permissions) > 0
+	return permission.Spec.Role != "" ||
+		len(permission.Spec.RoleBindings) > 0 ||
+		len(permission.Spec.Permissions) > 0
 }
 
 // setupCommands sets up bot commands for Telegram UI
 func (b *Bot) setupCommands() error {
 	commands := []tgbotapi.BotCommand{
 		{Command: "start", Description: "Start the bot and check your permissions"},
+		{Command: "whoami", Description: "Show your identity, roles, and what you can do"},
 		{Command: "help", Description: "Show help and available commands"},
 		{Command: "namespaces", Description: "List accessible namespaces"},
 		{Command: "pods", Description: "List pods in a namespace"},
@@ -236,7 +224,7 @@ func (b *Bot) setupCommands() error {
 		{Command: "scale", Description: "Scale a deployment"},
 		{Command: "grant", Description: "Grant permissions to a user (admin only)"},
 		{Command: "revoke", Description: "Revoke permissions from a user (admin only)"},
-		{Command: "role", Description: "Set a user's role (admin only)"},
+		{Command: "role", Description: "Set a user's role: /role <id> <viewer|operator|admin|none> [-n ns] (admin only)"},
 		{Command: "permissions", Description: "View user permissions"},
 		{Command: "users", Description: "List all users with permissions (admin only)"},
 		{Command: "selfupdate", Description: "Update bot to latest image (admin only)"},

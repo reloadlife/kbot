@@ -102,49 +102,73 @@ func formatAge(t time.Time) string {
 	}
 }
 
-// handleStart handles the /start command
+// handleStart / handleWhoami greets the user and shows their roles + abilities.
 func (b *Bot) handleStart(ctx context.Context, message *tgbotapi.Message) {
 	userID := message.From.ID
-	role := b.getUserRole(ctx, userID)
+	var sb strings.Builder
+	sb.WriteString("👋 <b>Kubernetes Bot</b>\n\n")
+	sb.WriteString("User ID: " + code(strconv.FormatInt(userID, 10)) + "\n")
 
-	b.send(message.Chat.ID, fmt.Sprintf("👋 Welcome to Kubernetes Bot!\n\nYour role: %s\nUser ID: %s\n\nType /help to see available commands.",
-		bold(role), code(strconv.FormatInt(userID, 10))))
+	bindings, err := b.rbac.EffectiveRoleBindings(ctx, userID)
+	if err != nil || len(bindings) == 0 {
+		sb.WriteString("\nYou have no access yet. Ask an admin to grant you a role.\n")
+		b.send(message.Chat.ID, sb.String())
+		return
+	}
+
+	sb.WriteString("\n<b>Roles:</b>\n")
+	for _, rb := range bindings {
+		line := "• " + htmlEscape(rb.Role) + " in " + code(rb.Namespace)
+		if rb.Selector != "" {
+			line += " (" + code(rb.Selector) + ")"
+		}
+		sb.WriteString(line + "\n")
+	}
+	sb.WriteString("\nType /help for the commands you can run.")
+	b.send(message.Chat.ID, sb.String())
 }
 
-// handleHelp handles the /help command
+// handleHelp shows only the command groups the caller can use.
 func (b *Bot) handleHelp(ctx context.Context, message *tgbotapi.Message) {
-	help := `<b>Available Commands</b>
+	caps := b.userCapabilities(ctx, message.From.ID)
 
-<b>Resource Queries:</b>
-/namespaces — list accessible namespaces
-/pods [namespace] [-l selector] — list pods
-/deployments [namespace] [-l selector] — list deployments
-/services [namespace] — list services
-/describe &lt;pod|deployment&gt; &lt;name&gt; [-n ns] — show details
-/events [namespace] — recent events
-/top [namespace] — pod CPU/memory usage
+	var sb strings.Builder
+	sb.WriteString("<b>Available Commands</b>\n\n")
+	sb.WriteString("<b>General:</b>\n/start, /whoami — your identity and roles\n/help — this message\n/namespaces — accessible namespaces\n/permissions — your permissions\n")
 
-<b>Operations (confirmed):</b>
-/logs &lt;pod&gt; [-n ns] [-c container] [--tail N] [--previous] [--since secs]
-/restart &lt;deployment&gt; [-n ns]
-/rollback &lt;deployment&gt; [-n ns]
-/scale &lt;deployment&gt; &lt;replicas&gt; [-n ns]
+	if caps.Read {
+		sb.WriteString("\n<b>Resource Queries:</b>\n")
+		sb.WriteString("/pods [ns] [-l selector]\n/deployments [ns] [-l selector]\n/services [ns]\n")
+		sb.WriteString("/describe &lt;pod|deployment&gt; &lt;name&gt; [-n ns]\n/events [ns]\n/top [ns]\n")
+		sb.WriteString("/logs &lt;pod&gt; [-n ns] [-c container] [--tail N] [--previous] [--since secs]\n")
+	}
+	if caps.Write {
+		sb.WriteString("\n<b>Operations (confirmed):</b>\n")
+		sb.WriteString("/restart &lt;deployment&gt; [-n ns]\n/rollback &lt;deployment&gt; [-n ns]\n/scale &lt;deployment&gt; &lt;replicas&gt; [-n ns]\n")
+	}
+	if caps.Admin {
+		sb.WriteString("\n<b>Admin Commands:</b>\n")
+		sb.WriteString("/role &lt;user_id&gt; &lt;viewer|operator|admin|none&gt; [-n ns] [-l selector]\n")
+		sb.WriteString("/grant &lt;user_id&gt; &lt;verb&gt; &lt;resource&gt; [-n ns] [-l selector]\n")
+		sb.WriteString("/revoke &lt;user_id&gt; &lt;verb&gt; &lt;resource&gt; -n ns\n")
+		sb.WriteString("/permissions [user_id]\n/users\n/selfupdate\n")
+	}
+	if !caps.Read && !caps.Write && !caps.Admin {
+		sb.WriteString("\nYou have no access yet. Ask an admin to grant you a role.")
+	}
+	b.send(message.Chat.ID, sb.String())
+}
 
-<b>Admin Commands:</b>
-/grant &lt;user_id&gt; &lt;verb&gt; &lt;resource&gt; [-n ns] [-l selector]
-/revoke &lt;user_id&gt; &lt;verb&gt; &lt;resource&gt; -n ns
-/role &lt;user_id&gt; &lt;admin|operator|viewer&gt;
-/permissions [user_id]
-/users — list all permission holders
-/selfupdate — restart the bot to pull the latest image
-
-<b>Examples:</b>
-<code>/pods production</code>
-<code>/logs frontend-abc -n production -c nginx --tail 200</code>
-<code>/scale api 3 -n staging</code>
-<code>/grant 123456789 logs pods -n production -l app=frontend</code>`
-
-	b.send(message.Chat.ID, help)
+// userCapabilities returns coarse read/write/admin flags for a user.
+func (b *Bot) userCapabilities(ctx context.Context, userID int64) rbac.Capabilities {
+	if b.rbac.IsBootstrapAdmin(userID) {
+		return rbac.Capabilities{Read: true, Write: true, Admin: true}
+	}
+	permission, err := b.rbac.GetUserPermission(ctx, userID)
+	if err != nil {
+		return rbac.Capabilities{}
+	}
+	return rbac.SummarizeCapabilities(permission.Spec)
 }
 
 // handleNamespaces handles the /namespaces command
@@ -168,9 +192,10 @@ func (b *Bot) handleNamespaces(ctx context.Context, message *tgbotapi.Message) {
 	b.send(message.Chat.ID, sb.String())
 }
 
-// resolveListAccess checks list permission for a resource and returns the
-// selector that must be applied to the query, or false if denied.
-func (b *Bot) resolveListAccess(ctx context.Context, chatID, userID int64, namespace, resource, userSelector string) (string, bool) {
+// resolveListAccess checks list permission for a resource. It returns the
+// selector to apply to the query, the permission-imposed restriction (for
+// display, empty if unrestricted), and ok=false if denied.
+func (b *Bot) resolveListAccess(ctx context.Context, chatID, userID int64, namespace, resource, userSelector string) (combined string, restriction string, ok bool) {
 	dec, err := b.validator.CheckPermission(ctx, rbac.PermissionCheck{
 		TelegramUserID: userID,
 		Namespace:      namespace,
@@ -179,9 +204,17 @@ func (b *Bot) resolveListAccess(ctx context.Context, chatID, userID int64, names
 	})
 	if err != nil || !dec.Allowed {
 		b.send(chatID, rbac.FormatPermissionDenied(dec.Reason))
-		return "", false
+		return "", "", false
 	}
-	return combineSelectors(dec.EffectiveSelector, userSelector), true
+	return combineSelectors(dec.EffectiveSelector, userSelector), dec.EffectiveSelector, true
+}
+
+// selectorFooter renders a restriction note, or "" when unrestricted.
+func selectorFooter(restriction string) string {
+	if restriction == "" {
+		return ""
+	}
+	return "\n🔒 filtered to " + code(restriction)
 }
 
 // handlePods handles the /pods command
@@ -189,7 +222,7 @@ func (b *Bot) handlePods(ctx context.Context, message *tgbotapi.Message) {
 	p := parseArgs(message.CommandArguments())
 	namespace := rbac.NormalizeNamespace(firstOr(p.positional, p.namespace))
 
-	selector, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "pods", p.selector)
+	selector, restriction, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "pods", p.selector)
 	if !ok {
 		return
 	}
@@ -212,7 +245,7 @@ func (b *Bot) handlePods(ctx context.Context, message *tgbotapi.Message) {
 		sb.WriteString(fmt.Sprintf("📦 %s\n   %s • %d/%d ready • %d restarts • %s\n\n",
 			code(pod.Name), htmlEscape(string(pod.Status.Phase)), ready, total, restarts, formatAge(pod.CreationTimestamp.Time)))
 	}
-	b.send(message.Chat.ID, sb.String())
+	b.send(message.Chat.ID, sb.String()+selectorFooter(restriction))
 }
 
 // podReadiness returns ready/total container counts and total restart count.
@@ -232,7 +265,7 @@ func (b *Bot) handleDeployments(ctx context.Context, message *tgbotapi.Message) 
 	p := parseArgs(message.CommandArguments())
 	namespace := rbac.NormalizeNamespace(firstOr(p.positional, p.namespace))
 
-	selector, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "deployments", p.selector)
+	selector, restriction, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "deployments", p.selector)
 	if !ok {
 		return
 	}
@@ -258,7 +291,7 @@ func (b *Bot) handleDeployments(ctx context.Context, message *tgbotapi.Message) 
 		sb.WriteString(fmt.Sprintf("🚀 %s\n   %d/%d ready • %s\n\n",
 			code(dep.Name), dep.Status.ReadyReplicas, desired, formatAge(dep.CreationTimestamp.Time)))
 	}
-	b.send(message.Chat.ID, sb.String())
+	b.send(message.Chat.ID, sb.String()+selectorFooter(restriction))
 }
 
 // handleServices handles the /services command
@@ -266,7 +299,7 @@ func (b *Bot) handleServices(ctx context.Context, message *tgbotapi.Message) {
 	p := parseArgs(message.CommandArguments())
 	namespace := rbac.NormalizeNamespace(firstOr(p.positional, p.namespace))
 
-	selector, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "services", p.selector)
+	selector, restriction, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "services", p.selector)
 	if !ok {
 		return
 	}
@@ -288,7 +321,7 @@ func (b *Bot) handleServices(ctx context.Context, message *tgbotapi.Message) {
 		sb.WriteString(fmt.Sprintf("🌐 %s\n   %s • %s\n\n",
 			code(svc.Name), htmlEscape(string(svc.Spec.Type)), htmlEscape(svc.Spec.ClusterIP)))
 	}
-	b.send(message.Chat.ID, sb.String())
+	b.send(message.Chat.ID, sb.String()+selectorFooter(restriction))
 }
 
 // handleLogs handles the /logs command
@@ -417,7 +450,7 @@ func (b *Bot) handleEvents(ctx context.Context, message *tgbotapi.Message) {
 	p := parseArgs(message.CommandArguments())
 	namespace := rbac.NormalizeNamespace(firstOr(p.positional, p.namespace))
 
-	if _, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "pods", ""); !ok {
+	if _, _, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "pods", ""); !ok {
 		return
 	}
 
@@ -455,7 +488,7 @@ func (b *Bot) handleTop(ctx context.Context, message *tgbotapi.Message) {
 	p := parseArgs(message.CommandArguments())
 	namespace := rbac.NormalizeNamespace(firstOr(p.positional, p.namespace))
 
-	if _, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "pods", ""); !ok {
+	if _, _, ok := b.resolveListAccess(ctx, message.Chat.ID, message.From.ID, namespace, "pods", ""); !ok {
 		return
 	}
 
@@ -579,6 +612,8 @@ func (b *Bot) handleGrant(ctx context.Context, message *tgbotapi.Message) {
 		b.fail(message.Chat.ID, "Grant permission", err)
 		return
 	}
+	b.auditPermissionChange(ctx, message.From.ID, targetUserID, "PermissionGranted",
+		fmt.Sprintf("granted %s %s in %s", verb, resource, namespace))
 
 	resp := fmt.Sprintf("✅ Granted to user %s\n\nNamespace: %s\nResource: %s\nVerb: %s",
 		code(p.positional[0]), code(namespace), code(resource), code(verb))
@@ -614,10 +649,15 @@ func (b *Bot) handleRevoke(ctx context.Context, message *tgbotapi.Message) {
 		b.fail(message.Chat.ID, "Revoke permission", err)
 		return
 	}
+	b.auditPermissionChange(ctx, message.From.ID, targetUserID, "PermissionRevoked",
+		fmt.Sprintf("revoked %s %s in %s", verb, resource, p.namespace))
 	b.send(message.Chat.ID, "✅ Revoked "+code(verb+" "+resource)+" in "+code(p.namespace)+" from user "+code(p.positional[0]))
 }
 
-// handleRole handles the /role command (admin only)
+// handleRole sets or removes a user's role binding (admin only).
+//
+//	/role <user_id> <admin|operator|viewer> [-n ns] [-l selector]
+//	/role <user_id> none [-n ns]
 func (b *Bot) handleRole(ctx context.Context, message *tgbotapi.Message) {
 	if !b.isAdmin(ctx, message.From.ID) {
 		b.send(message.Chat.ID, "❌ Admin access required.")
@@ -625,7 +665,7 @@ func (b *Bot) handleRole(ctx context.Context, message *tgbotapi.Message) {
 	}
 	p := parseArgs(message.CommandArguments())
 	if len(p.positional) < 2 {
-		b.send(message.Chat.ID, "Usage: /role &lt;user_id&gt; &lt;admin|operator|viewer&gt;")
+		b.send(message.Chat.ID, "Usage: /role &lt;user_id&gt; &lt;admin|operator|viewer|none&gt; [-n ns] [-l selector]")
 		return
 	}
 	targetUserID, err := strconv.ParseInt(p.positional[0], 10, 64)
@@ -634,12 +674,33 @@ func (b *Bot) handleRole(ctx context.Context, message *tgbotapi.Message) {
 		return
 	}
 	role := strings.ToLower(p.positional[1])
+	nsLabel := p.namespace
+	if nsLabel == "" {
+		nsLabel = "*"
+	}
 
-	if err := b.rbac.SetRole(ctx, targetUserID, role); err != nil {
+	if role == "none" {
+		if err := b.rbac.RemoveRoleBinding(ctx, targetUserID, p.namespace); err != nil {
+			b.fail(message.Chat.ID, "Remove role", err)
+			return
+		}
+		b.auditPermissionChange(ctx, message.From.ID, targetUserID, "PermissionRevoked",
+			fmt.Sprintf("removed role in %s", nsLabel))
+		b.send(message.Chat.ID, "✅ Removed role of user "+code(p.positional[0])+" in "+code(nsLabel))
+		return
+	}
+
+	if err := b.rbac.SetRoleBinding(ctx, targetUserID, role, p.namespace, p.selector); err != nil {
 		b.fail(message.Chat.ID, "Set role", err)
 		return
 	}
-	b.send(message.Chat.ID, "✅ Set role of user "+code(p.positional[0])+" to "+code(role))
+	b.auditPermissionChange(ctx, message.From.ID, targetUserID, "PermissionGranted",
+		fmt.Sprintf("set %s in %s", role, nsLabel))
+	resp := "✅ Set user " + code(p.positional[0]) + " to " + code(role) + " in " + code(nsLabel)
+	if p.selector != "" {
+		resp += " (" + code(p.selector) + ")"
+	}
+	b.send(message.Chat.ID, resp)
 }
 
 // handlePermissions handles the /permissions command
